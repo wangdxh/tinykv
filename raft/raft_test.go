@@ -363,6 +363,7 @@ func TestCommitWithHeartbeat2AB(t *testing.T) {
 	tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
 
 	sm := tt.peers[5].(*Raft)
+	fmt.Printf("xxxxxx %d", sm.RaftLog.committed)
 	if sm.RaftLog.committed != 1 {
 		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 1)
 	}
@@ -372,7 +373,6 @@ func TestCommitWithHeartbeat2AB(t *testing.T) {
 
 	// leader broadcast heartbeat
 	tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgBeat})
-
 	if sm.RaftLog.committed != 3 {
 		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 3)
 	}
@@ -562,10 +562,10 @@ func TestProposal2AB(t *testing.T) {
 }
 
 // TestHandleMessageType_MsgAppend ensures:
-// 1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
-// 2. If an existing entry conflicts with a new one (same index but different terms),
-//    delete the existing entry and all that follow it; append any new entries not already in the log.
-// 3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+//  1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
+//  2. If an existing entry conflicts with a new one (same index but different terms),
+//     delete the existing entry and all that follow it; append any new entries not already in the log.
+//  3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
 func TestHandleMessageType_MsgAppend2AB(t *testing.T) {
 	tests := []struct {
 		m       pb.Message

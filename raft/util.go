@@ -127,3 +127,7 @@ func IsResponseMsg(msgt pb.MessageType) bool {
 func isHardStateEqual(a, b pb.HardState) bool {
 	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
 }
+
+func needUpdateTermMsg(msgt pb.MessageType) bool {
+	return msgt != pb.MessageType_MsgHup && msgt != pb.MessageType_MsgBeat && msgt != pb.MessageType_MsgPropose
+}
