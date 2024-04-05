@@ -230,15 +230,19 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	if r.Term > term {
 		panic(" can not happend ")
 	}
-	r.State = StateFollower
-	r.electionElapsed = 0
-	r.electionTimeout = r.EleTimeout + rand.Intn(r.EleTimeout)
-	r.StateChanged = true
-	r.Lead = lead
-	if term > r.Term {
+
+	if term > r.Term || r.State != StateFollower {
 		r.Vote = None
+		r.StateChanged = true
+
+		r.State = StateFollower
+		r.Term = term
+		r.electionTimeout = r.EleTimeout + rand.Intn(r.EleTimeout)
 	}
-	r.Term = term
+	//r.Term = term
+	//r.State = StateFollower
+	r.electionElapsed = 0
+	r.Lead = lead
 
 }
 func (r *Raft) onlyme() bool {
@@ -568,12 +572,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 			r.Printf(0, "leader update commited to %d ", newcommit)
 		}
 	}
-	/*if m.Index == r.RaftLog.LastIndex() && updatecommit {
-		// update commited
-		r.sendAppend(m.From)
-	}*/
-
-	// broadcast commtied
+	// broadcast commtied， 在commited 更改和之前之后，response的peer 可能不会收到commited更新的消息，所以要遍历
 	for key, val := range r.Prs {
 		if key != r.id {
 			if val.Match == r.RaftLog.lastIndex() && val.Commited < r.RaftLog.committed {
@@ -715,7 +714,7 @@ func (r *Raft) Ready() Ready {
 		hard.Term = r.Term
 	}
 	return Ready{
-		HardState:        pb.HardState{},
+		HardState:        hard,
 		Entries:          r.RaftLog.unstableEntries(),
 		Messages:         r.msgs[:],
 		CommittedEntries: r.RaftLog.nextEnts(),
