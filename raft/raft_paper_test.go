@@ -189,10 +189,6 @@ func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 	}
 	for i, tt := range tests {
 		r := newTestRaft(1, idsBySize(tt.size), 10, 1, NewMemoryStorage())
-		if i == 7 || i == 8 {
-			x := 0
-			fmt.Printf("x %d", x)
-		}
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		for id, vote := range tt.votes {
 			r.Step(pb.Message{From: id, To: 1, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: !vote})
@@ -678,6 +674,52 @@ func TestFollowerAppendEntries2AB(t *testing.T) {
 	}
 }
 
+func TestFollowerAppendEnntiresByWxh2AB(t *testing.T) {
+	tests := []struct {
+		index, term uint64
+		lterm       uint64
+		ents        []*pb.Entry
+		wents       []*pb.Entry
+		wunstable   []*pb.Entry
+	}{
+		{
+			2, 2, 4,
+			[]*pb.Entry{{Term: 4, Index: 3}},
+			[]*pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}, {Term: 4, Index: 3}},
+			[]*pb.Entry{{Term: 4, Index: 3}},
+		},
+	}
+	for i, tt := range tests {
+		storage := NewMemoryStorage()
+		storage.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}, {Term: 2, Index: 3} /*, {Term: 2, Index: 4}*/})
+		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
+		r.becomeFollower(2, 2)
+
+		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: tt.lterm, LogTerm: tt.term, Index: tt.index, Entries: tt.ents})
+
+		wents := make([]pb.Entry, 0, len(tt.wents))
+		for _, ent := range tt.wents {
+			wents = append(wents, *ent)
+		}
+		if g := r.RaftLog.allEntries(); !reflect.DeepEqual(g, wents) {
+			t.Errorf("#%d: ents = %+v, want %+v", i, g, wents)
+		}
+		var wunstable []pb.Entry
+		if tt.wunstable != nil {
+			wunstable = make([]pb.Entry, 0, len(tt.wunstable))
+		}
+		for _, ent := range tt.wunstable {
+			wunstable = append(wunstable, *ent)
+		}
+		if g := r.RaftLog.unstableEntries(); !reflect.DeepEqual(g, wunstable) {
+			t.Errorf("#%d: unstableEnts = %+v, want %+v", i, g, wunstable)
+		}
+		if r.RaftLog.stabled != 2 {
+			t.Errorf(" stabled error %d not 2 ", r.RaftLog.stabled)
+		}
+	}
+}
+
 // TestLeaderSyncFollowerLog tests that the leader could bring a follower's log
 // into consistency with its own.
 // Reference: section 5.3, figure 7
@@ -750,8 +792,6 @@ func TestLeaderSyncFollowerLog2AB(t *testing.T) {
 		n.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: term + 1})
 
 		n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
-		lead.Printf(0, "raftlog : %v", lead.RaftLog)
-		follower.Printf(0, "raftlog : %v", follower.RaftLog)
 		if g := diffu(ltoa(lead.RaftLog), ltoa(follower.RaftLog)); g != "" {
 			t.Errorf("#%d: log diff:\n%s", i, g)
 		}

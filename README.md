@@ -38,6 +38,9 @@ The whole project is organized into the following directories:
 * `proto` contains the implementation of all communication between nodes and processes uses Protocol Buffers over gRPC. This package contains the protocol definitions used by TinyKV, and the generated Go code that you can use.
 * `log` contains utility to output log based on level.
 
+## tinykv architecture
+![overview](./tinykv.drawio.png)
+
 ## Reading List
 
 We provide a [reading list](doc/reading_list.md) for the knowledge of distributed storage system. Though not all of them are highly related with this course, they can help you construct the knowledge system in this field.

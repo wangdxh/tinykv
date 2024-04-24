@@ -177,3 +177,7 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
 }
+
+func (rn *RawNode) LastIndexAndTerm() (uint64, uint64) {
+	return rn.Raft.RaftLog.LastIndexTerm()
+}

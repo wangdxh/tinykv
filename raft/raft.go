@@ -17,10 +17,10 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 	"sort"
-	"time"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -84,6 +84,10 @@ type Config struct {
 	// Applied. If Applied is unset when restarting, raft might return previous
 	// applied entries. This is a very application dependent configuration.
 	Applied uint64
+}
+
+func (c *Config) Setpeers(peers []uint64) {
+	c.peers = peers
 }
 
 func (c *Config) validate() error {
@@ -198,8 +202,27 @@ func newRaft(c *Config) *Raft {
 
 	r.RaftLog = newLog(c.Storage)
 	r.RaftLog.applied = c.Applied
+	r.RaftLog.peerid = r.id
+	r.initPrs()
+
 	r.becomeFollower(r.Term, None)
 	return r
+}
+func (r *Raft) initPrs() {
+	r.Prs = make(map[uint64]*Progress)
+	for _, item := range r.Peers {
+		if item != r.id {
+			r.Prs[item] = &Progress{
+				Match: 0,
+				Next:  r.RaftLog.LastIndex() + 1,
+			}
+		} else {
+			r.Prs[item] = &Progress{
+				Match: r.RaftLog.LastIndex(),
+				Next:  r.RaftLog.LastIndex() + 1,
+			}
+		}
+	}
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -243,7 +266,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	//r.State = StateFollower
 	r.electionElapsed = 0
 	r.Lead = lead
-
+	mylog.Printf(mylog.LevelBaisc, "peer %d term %d becomefollow  l %d ", r.id, r.Term, r.Lead)
 }
 func (r *Raft) onlyme() bool {
 	return len(r.Peers) == 1 && r.Peers[0] == r.id
@@ -272,28 +295,16 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
-	r.Printf(0, " i become leader ")
 	r.State = StateLeader
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.StateChanged = true
 
 	r.Lead = r.id
-	r.Prs = make(map[uint64]*Progress)
+	r.initPrs()
 
-	for _, item := range r.Peers {
-		if item != r.id {
-			r.Prs[item] = &Progress{
-				Match: 0,
-				Next:  r.RaftLog.LastIndex() + 1,
-			}
-		} else {
-			r.Prs[item] = &Progress{
-				Match: r.RaftLog.LastIndex(),
-				Next:  r.RaftLog.LastIndex() + 1,
-			}
-		}
-	}
+	mylog.Printf(mylog.LevelBaisc, "peer %d term %d becomeleader", r.id, r.Term)
+
 	_ = r.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		Entries: []*pb.Entry{{Data: nil}},
@@ -470,7 +481,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 				val.Commited = r.RaftLog.committed
 				r.Prs[to] = val
 
-				r.Printf(0, " send append to %d  :  Index : %d , LogTerm : %d commit %d ents : %d ", to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
+				if len(req.Entries) > 0 && req.Entries[0].Index != preinx+1 {
+					panic(" this can not happend")
+				}
+
+				mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
+					r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
 				r.msgs = append(r.msgs, req)
 			}
 		} else if progress.Match == r.RaftLog.LastIndex() {
@@ -480,7 +496,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 			val.Commited = r.RaftLog.committed
 			r.Prs[to] = val
 
-			r.Printf(0, " send append to %d  :  Index : %d , LogTerm : %d commit %d ents : %d ", to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
+				r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
 			r.msgs = append(r.msgs, req)
 		}
 		return true
@@ -498,19 +515,27 @@ func (r *Raft) handleAppendEntries(m pb.Message) error {
 		r.electionElapsed = 0
 		logterm, err := r.RaftLog.Term(m.Index)
 		if err != nil || m.LogTerm != logterm {
-			r.Printf(0, " handle append reject because err %v  mlogtem %d  logterm %d ", err, m.LogTerm, logterm)
+			mylog.Printf(mylog.LevelAppendEntry, " peer %d term %d handleAppendEntries reject because err %v mindex %d mlogtem %d  logterm %d ",
+				r.id, r.Term, err, m.Index, m.LogTerm, logterm)
 			goto OUT
 		}
 
 		if len(m.Entries) > 0 {
 			if m.Index+1 != m.Entries[0].Index {
-				panic(" index error ")
+				panic(fmt.Sprintf(" index error %d %d is not right msg %v \n", m.Index, m.Entries[0].Index, m))
 			}
 			var ents []pb.Entry
 			for _, item := range m.Entries {
 				ents = append(ents, *item)
 			}
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d follower  raftlog len %d  append ents len %d ,first: inx %d term %d end: inx %d term %d from peer %d leaderis %d",
+				r.id, r.Term, len(r.RaftLog.entries), len(ents), ents[0].Index, ents[0].Term, ents[len(ents)-1].Index, ents[len(ents)-1].Term, m.From, r.Lead)
+
 			err = r.RaftLog.append(ents)
+
+			tempents := r.RaftLog.entries
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d follower after append raftlog len %d  first: inx %d term %d end: inx %d term %d ",
+				r.id, r.Term, len(tempents), tempents[0].Index, tempents[0].Term, tempents[len(tempents)-1].Index, tempents[len(tempents)-1].Term)
 			if err != nil {
 				goto OUT
 			}
@@ -520,8 +545,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) error {
 		lastindex := r.RaftLog.LastIndex()
 		lastterm, _ := r.RaftLog.Term(lastindex)
 		if lastterm == r.Term && m.Commit > r.RaftLog.committed {
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d follower update commited from %d to %d ", r.id, r.Term, r.RaftLog.committed, min(m.Commit, r.RaftLog.LastIndex()))
 			r.RaftLog.committed = min(m.Commit, r.RaftLog.LastIndex()) // lastindex)
-			r.Printf(0, "follower update commited to %d ", r.RaftLog.committed)
 		}
 		resp.Reject = false
 		resp.Index = m.Index + uint64(len(m.Entries))
@@ -533,10 +558,10 @@ OUT:
 
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 	// Your Code Here (2A).
-	r.Printf(0, " get append response from %d  reject %v m.index %d  ", m.From, m.Reject, m.Index)
+	//r.Printf(0, " get append response from %d  reject %v m.index %d  ", m.From, m.Reject, m.Index)
 	val := r.Prs[m.From]
 	if m.Reject == true {
-		inx, _ := r.RaftLog.getPreviousIndexTerm(m.LogTerm)
+		inx, _ := r.RaftLog.getOlderNextIndexfromTerm(m.LogTerm)
 		val.Match = 0
 		val.Next = inx
 		val.Commited = 0
@@ -562,22 +587,22 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 		// 3, 5   5,3   2/2+1-1 = 1
 		quorum := len(r.Peers)/2 + 1 - 1
 		newcommit = checkcommit[quorum]
-		r.Printf(0, "new commit %d in  %v", newcommit, checkcommit)
+		/*r.Printf(0, "new commit %d in  %v", newcommit, checkcommit)*/
 	}
 
 	if newcommit > r.RaftLog.committed {
 		term, _ := r.RaftLog.Term(newcommit)
 		if term == r.Term {
 			r.RaftLog.committed = newcommit
-			r.Printf(0, "leader update commited to %d ", newcommit)
+			/*r.Printf(0, "leader update commited to %d ", newcommit)*/
 		}
 	}
 	// broadcast commtied， 在commited 更改和之前之后，response的peer 可能不会收到commited更新的消息，所以要遍历
 	for key, val := range r.Prs {
 		if key != r.id {
 			if val.Match == r.RaftLog.lastIndex() && val.Commited < r.RaftLog.committed {
-				r.Printf(0, " test  peer %d  valmatch %d r.lastindex %d valcommited %d  r.commited %d",
-					key, val.Match, r.RaftLog.lastIndex(), val.Commited, r.RaftLog.committed)
+				/*r.Printf(0, " test  peer %d  valmatch %d r.lastindex %d valcommited %d  r.commited %d",
+				key, val.Match, r.RaftLog.lastIndex(), val.Commited, r.RaftLog.committed)*/
 				r.sendAppend(key)
 			}
 		}
@@ -619,10 +644,9 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 	}
 
 	if m.Reject == false {
-		//val := r.Prs[m.From]
 		if m.Index < r.RaftLog.LastIndex() {
-			r.Printf(0, " get heartbeat resp from %d reject %v  r.lastindex %d m.index %d",
-				m.From, m.Reject, r.RaftLog.lastIndex(), m.Index)
+			/*r.Printf(0, " get heartbeat resp from %d reject %v  r.lastindex %d m.index %d",
+			m.From, m.Reject, r.RaftLog.lastIndex(), m.Index)*/
 			r.sendAppend(m.From)
 		}
 	}
@@ -640,7 +664,7 @@ func (r *Raft) sendRequestVote(to uint64) {
 		LogTerm: term,
 		Index:   inx,
 	}
-	r.Printf(0, " send request vote to %d   index %d logterm %d ", to, inx, term)
+	//r.Printf(0, " send request vote to %d   index %d logterm %d ", to, inx, term)
 	r.msgs = append(r.msgs, req)
 }
 
@@ -658,9 +682,9 @@ func (r *Raft) handleRequestVote(m pb.Message) error {
 	//Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in the logs.
 	//If the logs have last entries with different terms, then the log with the later term is more up-to-date.
 	//If the logs end with the same term, then whichever log is longer is more up-to-date.
-	r.Printf(0, " handle requestvote m.term %d  m.from %d  myvote %d mystate %s  reject %v  %d %d %d %d",
-		m.Term, m.From, r.Vote, r.State.String(), resp.Reject,
-		m.LogTerm, lastterm, m.Index, lastindex)
+	/*r.Printf(0, " handle requestvote m.term %d  m.from %d  myvote %d mystate %s  reject %v  %d %d %d %d",
+	m.Term, m.From, r.Vote, r.State.String(), resp.Reject,
+	m.LogTerm, lastterm, m.Index, lastindex)*/
 
 	r.msgs = append(r.msgs, resp)
 	return nil
@@ -672,7 +696,6 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 		return nil
 	}
 	if r.State == StateCandidate {
-		r.Printf(0, " get requestvote resp from %d  reject: %v m.term: %d", m.From, m.Reject, m.Term)
 		r.votes[m.From] = !m.Reject
 		nums := 0
 		for _, val := range r.votes {
@@ -746,13 +769,5 @@ func (r *Raft) Advance(rd Ready) {
 		rd.HardState.Vote == r.Vote &&
 		rd.HardState.Commit == r.RaftLog.committed {
 		r.StateChanged = false
-	}
-}
-
-func (r *Raft) Printf(level int, format string, a ...interface{}) {
-	if r.DebugLevel >= level {
-		str := fmt.Sprintf(format, a...)
-		format := "2006-01-02 15:04:05.000"
-		fmt.Printf("%s%d term %d %s -- %s\n", r.PrintfPrefix, r.id, r.Term, time.Now().Format(format), str)
 	}
 }

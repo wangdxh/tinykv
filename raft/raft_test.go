@@ -363,7 +363,6 @@ func TestCommitWithHeartbeat2AB(t *testing.T) {
 	tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
 
 	sm := tt.peers[5].(*Raft)
-	fmt.Printf("xxxxxx %d", sm.RaftLog.committed)
 	if sm.RaftLog.committed != 1 {
 		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 1)
 	}

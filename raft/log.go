@@ -17,6 +17,7 @@ package raft
 import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap/errors"
 )
@@ -55,6 +56,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	peerid uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -69,14 +71,19 @@ func newLog(storage Storage) *RaftLog {
 	ents := make([]pb.Entry, 1)
 	first, _ := storage.FirstIndex()
 	last, _ := storage.LastIndex()
-	snap, err := storage.Snapshot()
-	fmt.Printf(" snapmeta %v err %v \n", snap.Metadata, err)
-	if err == nil {
-		ents = []pb.Entry{{Term: snap.Metadata.Term, Index: snap.Metadata.Index}}
+	oldinx := first - 1
+	oldterm, err := storage.Term(oldinx)
+	if err != nil {
+		panic(fmt.Sprintf(" get old inx  %d term error %v", oldinx, err))
 	}
+	ents = []pb.Entry{{Index: oldinx, Term: oldterm}}
+
 	logs, err := storage.Entries(first, last+1)
+	if err != nil {
+		panic(fmt.Sprintf(" get storage entries from %d to %d  error %v", first, last+1, err))
+	}
 	ents = append(ents, logs...)
-	fmt.Printf(" entries form storage : err %v ents:  %v logs: %v \n", err, ents, logs)
+	mylog.Printf(mylog.LevelBaisc, " entries fromstorage : ents: first %d-%d logs len : %d", ents[0].Index, ents[0].Term, len(logs))
 
 	raftlog := &RaftLog{
 		entries:   ents,
@@ -84,8 +91,12 @@ func newLog(storage Storage) *RaftLog {
 		stabled:   last,
 		committed: hard.Commit,
 		applied:   0,
+		//peerid:    peerid,
 	}
 	return raftlog
+}
+func (l *RaftLog) setpeerid(peerid uint64) {
+	l.peerid = peerid
 }
 
 func (l *RaftLog) append(entries []pb.Entry) error {
@@ -111,6 +122,7 @@ func (l *RaftLog) append(entries []pb.Entry) error {
 	if firstlog > entries[0].Index {
 		entries = entries[firstlog-entries[0].Index:]
 	}
+	badindex, badterm := uint64(0), uint64(0)
 	offset := entries[0].Index - l.entries[0].Index
 	switch {
 	case uint64(len(l.entries)) > offset:
@@ -120,18 +132,36 @@ func (l *RaftLog) append(entries []pb.Entry) error {
 				offset++
 				inx++
 			} else {
+				badindex = entries[inx].Index
+				badterm = entries[inx].Term
+				mylog.Printf(mylog.LevelAppendEntry, "peer %d in append index and term not equal index %d : %d term %d : %d ",
+					l.peerid, entries[inx].Index, l.entries[offset].Index, entries[inx].Term, l.entries[offset].Term)
 				break
 			}
 		}
 		// inx = 3  offset 4
 		oldentries := l.entries
 		l.entries = append([]pb.Entry{}, l.entries[:offset]...)
-		l.stabled = l.lastIndex()
-		if inx == len(entries) { // 1,1    1,1  2,2
+		laststable := l.stabled
+		l.stabled = min(l.lastIndex(), laststable) // 有些数据不准确，被截断了， 先把原来正确的拷贝过来，更新stabled
+		if inx == len(entries) {                   // 1,1    1,1  2,2
 			l.entries = append(l.entries, oldentries[offset:]...)
-			l.stabled = l.lastIndex()
+			// 没有新数据了，那么剩余的老数据依然准确，拷贝过来，更新stabled 但是不能比原来的数值大
+			l.stabled = min(l.lastIndex(), laststable)
 		} else {
 			l.entries = append(l.entries, entries[inx:]...)
+		}
+		if badindex != 0 && badterm != 0 {
+			for _, item := range l.entries {
+				if item.Index == badindex {
+					mylog.Printf(mylog.LevelAppendEntry, "peer %d after different badindex %d badterm %d  to  term %d ",
+						l.peerid, badindex, badterm, item.Term)
+					break
+				}
+			}
+		}
+		if l.stabled != laststable {
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d stableed changed from %d to %d ", l.peerid, laststable, l.stabled)
 		}
 
 	case uint64(len(l.entries)) == offset:
@@ -244,7 +274,7 @@ func (l *RaftLog) getLastValidIndexTerm() (uint64, uint64) {
 }
 
 // return perv inx, term
-func (l *RaftLog) getPreviousIndexTerm(term uint64) (uint64, uint64) {
+func (l *RaftLog) getOlderNextIndexfromTerm(term uint64) (uint64, uint64) {
 	previnx, prevterm := uint64(0), uint64(0)
 	for inx := len(l.entries) - 1; inx >= 0; inx-- {
 		if prevterm == 0 && l.entries[inx].Term < term {
@@ -252,6 +282,9 @@ func (l *RaftLog) getPreviousIndexTerm(term uint64) (uint64, uint64) {
 			previnx = l.entries[inx].Index
 			break
 		}
+	}
+	if previnx == l.entries[0].Index {
+		return l.entries[1].Index, l.entries[1].Term
 	}
 	return previnx, prevterm
 }

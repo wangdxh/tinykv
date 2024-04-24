@@ -3,6 +3,7 @@ package raftstore
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"time"
 
 	"github.com/Connor1996/badger"
@@ -308,6 +309,37 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	// 遍历entryies， index 小于 entryies的末尾， 大于等于目前的
+	if len(entries) > 0 {
+		log.Infof(" peer %s append entries len %d  lastindex %d \n", ps.Tag, len(entries), entries[len(entries)-1].Index)
+	}
+
+	if len(entries) > 0 {
+		deletemore := false
+		for _, item := range entries {
+			if entry, err := meta.GetRaftEntry(ps.Engines.Raft, ps.region.Id, item.Index); err == nil {
+				if entry.Term != item.Term {
+					// delet all the item >= this
+					deletemore = true
+				}
+			}
+			raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, item.Index), &item)
+		}
+
+		deletefrom := entries[len(entries)-1].Index + 1
+		for deletemore {
+			_, err := meta.GetRaftEntry(ps.Engines.Raft, ps.region.Id, deletefrom)
+			if err == nil {
+				raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, deletefrom))
+				deletefrom++
+			} else {
+				break
+			}
+		}
+
+		ent := entries[len(entries)-1]
+		ps.raftState.LastIndex, ps.raftState.LastTerm = ent.Index, ent.Term
+	}
 	return nil
 }
 
@@ -331,6 +363,31 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	//  including append log entries and save the Raft hard state.
+	if !raft.IsEmptyHardState(ready.HardState) {
+		log.Infof("peer hardstate %v ", ps.Tag, ready.HardState)
+	}
+	if len(ready.Entries) > 0 {
+		mylog.Printf(mylog.LevelAppendEntry, " peer %s SaveReadyState stable from %d - %d to %d - %d ", ps.Tag,
+			ready.Entries[0].Index, ready.Entries[0].Term, ready.Entries[len(ready.Entries)-1].Index, ready.Entries[len(ready.Entries)-1].Term)
+	}
+	write := false
+	wbraft := engine_util.WriteBatch{}
+	if len(ready.Entries) > 0 {
+		err := ps.Append(ready.Entries, &wbraft)
+		write = true
+		if err != nil {
+			panic(fmt.Sprintf(" append error %v ", err))
+		}
+	}
+	if !raft.IsEmptyHardState(ready.HardState) {
+		write = true
+		*ps.raftState.HardState = ready.HardState
+	}
+	if write {
+		wbraft.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	}
+	wbraft.MustWriteToDB(ps.Engines.Raft)
 	return nil, nil
 }
 

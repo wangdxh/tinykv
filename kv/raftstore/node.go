@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"context"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"time"
 
 	"github.com/Connor1996/badger"
@@ -190,13 +191,14 @@ func (n *Node) BootstrapCluster(ctx context.Context, engines *engine_util.Engine
 }
 
 func (n *Node) startNode(engines *engine_util.Engines, trans Transport, snapMgr *snap.SnapManager) error {
-	log.Infof("start raft store node, storeID: %d", n.store.GetId())
+	mylog.Printf(mylog.LevelBaisc, "start raft store node, storeID: %d", n.store.GetId())
 	return n.system.start(n.store, n.cfg, engines, trans, n.schedulerClient, snapMgr)
 }
 
 func (n *Node) stopNode(storeID uint64) {
-	log.Infof("stop raft store thread, storeID: %d", storeID)
+	mylog.Printf(mylog.LevelBaisc, "stop raft store thread, storeID: %d", storeID)
 	n.system.shutDown()
+	mylog.Printf(mylog.LevelBaisc, "stop raft store thread, storeID: %d ok", storeID)
 }
 
 func (n *Node) Stop() {
