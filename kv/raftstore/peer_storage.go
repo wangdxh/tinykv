@@ -344,7 +344,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 }
 
 // Apply the peer with given snapshot
-func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
+func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
 	snapData := new(rspb.RaftSnapshotData)
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
@@ -355,7 +355,30 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	ch := make(chan bool, 1)
+	ps.snapState = snap.SnapState{
+		StateType:     snap.SnapState_Applying,
+		ApplyReceiver: ch,
+	}
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: ps.region.GetId(),
+		Notifier: ch,
+		SnapMeta: snapshot.Metadata,
+		StartKey: ps.region.StartKey,
+		EndKey:   ps.region.EndKey,
+	}
+
+	mylog.Printf(mylog.LevelCompactSnapshot, "peer %s start applysnapshot: index %d term %d", ps.Tag, snapshot.Metadata.Index, snapshot.Metadata.Term)
+	result := <-ch
+	ps.snapState = snap.SnapState{
+		StateType:     snap.SnapState_Relax,
+		ApplyReceiver: nil,
+	}
+	mylog.Printf(mylog.LevelCompactSnapshot, "peer %s end applysnapshot: index %d term %d return %v ", ps.Tag, snapshot.Metadata.Index, snapshot.Metadata.Term, result)
+	if result {
+		return nil, nil
+	}
+	return nil, errors.New(" applysnapshot error ")
 }
 
 // Save memory states to disk.
@@ -368,7 +391,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		log.Infof("peer hardstate %v ", ps.Tag, ready.HardState)
 	}
 	if len(ready.Entries) > 0 {
-		mylog.Printf(mylog.LevelAppendEntry, " peer %s SaveReadyState stable from %d - %d to %d - %d ", ps.Tag,
+		mylog.Printf(mylog.LevelAppendEntry, " peer %s SaveReadyState stable from first %d - %d to last %d - %d ", ps.Tag,
 			ready.Entries[0].Index, ready.Entries[0].Term, ready.Entries[len(ready.Entries)-1].Index, ready.Entries[len(ready.Entries)-1].Term)
 	}
 	write := false

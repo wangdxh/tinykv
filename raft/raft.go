@@ -115,6 +115,8 @@ func (c *Config) validate() error {
 type Progress struct {
 	Match, Next uint64
 	Commited    uint64
+	Sending     bool
+	SendTick    uint64
 }
 
 type Raft struct {
@@ -173,6 +175,8 @@ type Raft struct {
 	EleTimeout   int
 	DebugLevel   int
 	PrintfPrefix string
+	Snapshot     *pb.Snapshot
+	monoticks    uint64 // when in test cases ，monoticks maybe is 0
 }
 
 // newRaft return a raft peer with the given config
@@ -201,7 +205,7 @@ func newRaft(c *Config) *Raft {
 	r.Peers = append(r.Peers, r.id)
 
 	r.RaftLog = newLog(c.Storage)
-	r.RaftLog.applied = c.Applied
+	r.RaftLog.applied = max(c.Applied, r.RaftLog.applied)
 	r.RaftLog.peerid = r.id
 	r.initPrs()
 
@@ -228,7 +232,11 @@ func (r *Raft) initPrs() {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	r.monoticks++
 	if r.State == StateLeader {
+		// 100 ms one tick
+		// mylog.Printf(mylog.LevelBaisc, "leader  ticks   %d  %d ", r.heartbeatTimeout, r.electionTimeout)
+
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
 			r.heartbeatElapsed = 0
@@ -285,6 +293,7 @@ func (r *Raft) becomeCandidate() {
 	r.Vote = r.id
 	r.votes = make(map[uint64]bool, len(r.Peers))
 	r.votes[r.id] = true
+	mylog.Printf(mylog.LevelBaisc, "peer %d term %d becomeCandidate  ", r.id, r.Term)
 
 	if r.onlyme() {
 		r.becomeLeader()
@@ -375,7 +384,7 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 	}
 
-	if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat {
+	if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgSnapshot {
 		if r.State == StateLeader && m.Term == r.Term {
 			panic(" big problome, election error , now have  two leader !!!!!!!!!!!!!!!!!")
 		}
@@ -403,6 +412,11 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHeartbeat:
 			{
 				return r.handleHeartbeat(m)
+			}
+		case pb.MessageType_MsgSnapshot:
+			{
+				r.handleSnapshot(m)
+				return nil
 			}
 		}
 	} else if r.State == StateLeader {
@@ -461,48 +475,95 @@ func (r *Raft) sendAppend(to uint64) bool {
 	if to == r.id {
 		panic(" stupid")
 	}
-	if r.State == StateLeader {
-		progress := r.Prs[to]
-		if r.RaftLog.LastIndex() >= progress.Next {
-			if progress.Next < 1 {
-				progress.Next = 1
-			}
-			preinx := progress.Next - 1
-			preterm, err1 := r.RaftLog.Term(preinx)
-			ents, err2 := r.RaftLog.getEntries(progress.Next, min(progress.Next+1000, r.RaftLog.LastIndex()+1))
-			if err1 == ErrCompacted || err2 == ErrCompacted {
-				panic(" not implenmented")
-			} else if err1 == nil && err2 == nil && len(ents) > 0 {
-				req := r.getAppendRequest(to, preinx, preterm)
-				for inx := 0; inx <= len(ents)-1; inx++ {
-					req.Entries = append(req.Entries, &ents[inx])
-				}
-				val := r.Prs[to]
-				val.Commited = r.RaftLog.committed
-				r.Prs[to] = val
+	if r.State != StateLeader {
+		return false
+	}
 
-				if len(req.Entries) > 0 && req.Entries[0].Index != preinx+1 {
-					panic(" this can not happend")
-				}
-
-				mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
-					r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
-				r.msgs = append(r.msgs, req)
+	progress := r.Prs[to]
+	if progress.Sending == true && r.monoticks > 0 {
+		bsend := false
+		for _inx, msg := range r.msgs {
+			if msg.To == to &&
+				(msg.MsgType == pb.MessageType_MsgAppend || msg.MsgType == pb.MessageType_MsgSnapshot) {
+				mylog.Printf(mylog.LevelAppendEntry, "peer %d send append to %d erase msg preindex %d preterm %d ents: %d ",
+					r.id, to, msg.Index, msg.LogTerm, len(msg.Entries))
+				r.msgs = append(r.msgs[0:_inx], r.msgs[_inx:]...)
+				bsend = true
+				break
 			}
-		} else if progress.Match == r.RaftLog.LastIndex() {
-			preinx, preterm := r.RaftLog.LastIndexTerm()
+		}
+		if bsend == false {
+			mylog.Printf(mylog.LevelAppendEntry, " peer %d donotsendappend to %d because sending is false", r.id, to)
+			return false
+		}
+	}
+
+	if r.RaftLog.LastIndex() >= progress.Next {
+		if progress.Next < 1 {
+			progress.Next = 1
+		}
+		preinx := progress.Next - 1
+		preterm, err1 := r.RaftLog.Term(preinx)
+		ents, err2 := r.RaftLog.getEntries(progress.Next, min(progress.Next+1000, r.RaftLog.LastIndex()+1))
+		if err1 != nil || err2 != nil {
+			err := err1
+			if err == nil {
+				err = err2
+			}
+			mylog.Printf(mylog.LevelCompactSnapshot, "peer %d sendappend to %d will snapshot err %v, preinx %d ",
+				r.id, to, err, preinx)
+
+			snapmsg := r.getAppendRequest(to, 0, 0)
+			snap, err := r.RaftLog.storage.Snapshot()
+			if err != nil {
+				mylog.Printf(mylog.LevelCompactSnapshot, "peer %d sendappend to %d start snapshot() return err: %v", r.id, to, err)
+				return false
+			}
+			mylog.Printf(mylog.LevelCompactSnapshot, "peer %d sendappend to %d start snapshot() ok : %v", r.id, to, err)
+			snapmsg.Snapshot = &snap
+			snapmsg.MsgType = pb.MessageType_MsgSnapshot
+			r.msgs = append(r.msgs, snapmsg)
+
+			val := r.Prs[to]
+			val.Match = snap.Metadata.Index
+			val.Next = val.Match + 1
+			r.Prs[to] = val
+		} else if err1 == nil && err2 == nil && len(ents) > 0 {
 			req := r.getAppendRequest(to, preinx, preterm)
+			for inx := 0; inx <= len(ents)-1; inx++ {
+				req.Entries = append(req.Entries, &ents[inx])
+			}
 			val := r.Prs[to]
 			val.Commited = r.RaftLog.committed
 			r.Prs[to] = val
 
+			if len(req.Entries) > 0 && req.Entries[0].Index != preinx+1 {
+				panic(" this can not happend")
+			}
+
 			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
 				r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
 			r.msgs = append(r.msgs, req)
+		} else {
+			return false
 		}
-		return true
+	} else if progress.Match == r.RaftLog.LastIndex() {
+		preinx, preterm := r.RaftLog.LastIndexTerm()
+		req := r.getAppendRequest(to, preinx, preterm)
+		val := r.Prs[to]
+		val.Commited = r.RaftLog.committed
+		r.Prs[to] = val
+
+		mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
+			r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
+		r.msgs = append(r.msgs, req)
+	} else {
+		return false
 	}
-	return false
+	progress.Sending = true
+	progress.SendTick = r.monoticks
+	r.Prs[to] = progress
+	return true
 }
 
 // handleAppendEntries handle AppendEntries RPC request
@@ -552,6 +613,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) error {
 		resp.Index = m.Index + uint64(len(m.Entries))
 	}
 OUT:
+	if resp.Reject == true {
+		// resp Commit 保存的是，本地的最后一个Index，先直接定位
+		resp.Commit, _ = r.RaftLog.LastIndexTerm()
+	}
 	r.msgs = append(r.msgs, resp)
 	return nil
 }
@@ -560,12 +625,20 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 	// Your Code Here (2A).
 	//r.Printf(0, " get append response from %d  reject %v m.index %d  ", m.From, m.Reject, m.Index)
 	val := r.Prs[m.From]
+	val.Sending = false
 	if m.Reject == true {
-		inx, _ := r.RaftLog.getOlderNextIndexfromTerm(m.LogTerm)
+		var inx uint64 = 0
+		if m.Index > m.Commit {
+			inx = m.Commit
+		} else {
+			inx, _ = r.RaftLog.getOlderNextIndexfromTerm(m.LogTerm)
+		}
 		val.Match = 0
 		val.Next = inx
 		val.Commited = 0
 		r.Prs[m.From] = val
+		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d sendappend to %d reject m.Index %d m.logterm %d , Next will be %d ",
+			r.id, m.From, m.Index, m.LogTerm, inx)
 		r.sendAppend(m.From)
 		return nil
 	} else {
@@ -597,6 +670,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 			/*r.Printf(0, "leader update commited to %d ", newcommit)*/
 		}
 	}
+
 	// broadcast commtied， 在commited 更改和之前之后，response的peer 可能不会收到commited更新的消息，所以要遍历
 	for key, val := range r.Prs {
 		if key != r.id {
@@ -631,6 +705,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) error {
 	if m.Term >= r.Term {
 		r.electionElapsed = 0
 		response.Index = r.RaftLog.LastIndex()
+		response.Commit = r.RaftLog.committed
 		response.Reject = false
 	}
 	r.msgs = append(r.msgs, response)
@@ -643,11 +718,25 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 		return nil
 	}
 
+	mylog.Printf(mylog.LevelHeartbeat, " peer %d handleHeartbeatResponse from %d  m.index %d  myraftlog lastindex %d m.commit %d  r.raftlog.commited %d ",
+		r.id, m.From, m.Index, r.RaftLog.LastIndex(), m.Commit, r.RaftLog.committed)
+
 	if m.Reject == false {
-		if m.Index < r.RaftLog.LastIndex() {
+		//if  {
+		if m.Commit < r.RaftLog.committed || m.Index < r.RaftLog.LastIndex() {
 			/*r.Printf(0, " get heartbeat resp from %d reject %v  r.lastindex %d m.index %d",
 			m.From, m.Reject, r.RaftLog.lastIndex(), m.Index)*/
-			r.sendAppend(m.From)
+			val, has := r.Prs[m.From]
+			if has == false {
+				panic(" this can not happen123")
+			}
+			var appenddelayticks uint64 = 3 // 50ms   1s
+			if r.monoticks == 0 || val.SendTick+appenddelayticks < r.monoticks {
+				val.Sending = false
+				val.Commited = m.Commit
+				r.Prs[m.From] = val
+				r.sendAppend(m.From)
+			}
 		}
 	}
 	return nil
@@ -716,6 +805,118 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	//  restore the raft internal state like the term, commit index and membership information, etc, from the eraftpb.SnapshotMetadata in the message,
+
+	if m.Snapshot.Metadata.Index <= r.RaftLog.firstIndex()-1 {
+		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  handleSnapshot discard because snapshotindex %d <= firstindex-1 %d",
+			r.id, m.Snapshot.Metadata.Index, r.RaftLog.firstIndex()-1)
+		return
+	}
+
+	r.Snapshot = m.Snapshot
+	r.Term = max(r.Term, m.Snapshot.Metadata.Term)
+	r.StateChanged = true
+
+	bfind := false
+	inx := -1
+	for _inx, ent := range r.RaftLog.entries {
+		if ent.Index == m.Snapshot.Metadata.Index && ent.Term == m.Snapshot.Metadata.Term {
+			bfind = true
+			inx = _inx
+			break
+		}
+	}
+
+	oldentries := r.RaftLog.entries
+	r.RaftLog.entries = []pb.Entry{
+		{
+			Term:  m.Snapshot.Metadata.Term,
+			Index: m.Snapshot.Metadata.Index,
+		},
+	}
+	//这三个值的处理容易出错
+	//applyied  必须重置为snapshot的index
+	//stabled commited 取当前log 和 snapshot 的最大值,
+	r.RaftLog.applied = m.Snapshot.Metadata.Index
+	if bfind == false {
+		r.RaftLog.committed = m.Snapshot.Metadata.Index
+		r.RaftLog.stabled = m.Snapshot.Metadata.Index
+	} else {
+		r.RaftLog.entries = append(r.RaftLog.entries, oldentries[inx+1:]...)
+		r.RaftLog.stabled = max(r.RaftLog.stabled, m.Snapshot.Metadata.Index)
+		r.RaftLog.committed = max(r.RaftLog.committed, m.Snapshot.Metadata.Index)
+	}
+	oldentries = nil
+
+	for _, item := range m.Snapshot.Metadata.ConfState.Nodes {
+		bfind := false
+		for _, peer := range r.Peers {
+			if peer == item {
+				bfind = true
+			}
+		}
+		if bfind == false {
+			r.Peers = append(r.Peers, item)
+		}
+	}
+
+	for i := 0; i < len(r.Peers); {
+		exist := false
+		for _, item := range m.Snapshot.Metadata.ConfState.Nodes {
+			if r.Peers[i] == item {
+				exist = true
+			}
+		}
+		if exist == false {
+			r.Peers = append(r.Peers[:i], r.Peers[i+1:]...)
+		} else {
+			i++
+		}
+	}
+	r.initPrs()
+}
+
+func (r *Raft) HandleSnapshotAgain(snapmeta pb.SnapshotMetadata) {
+	// Your Code Here (2C).
+	//  restore the raft internal state like the term, commit index and membership information, etc, from the eraftpb.SnapshotMetadata in the message,
+	if snapmeta.Index < r.RaftLog.firstIndex()-1 {
+		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  handleSnapshotAgain discard because snapshotindex %d <= firstindex-1 %d",
+			r.id, snapmeta.Index, r.RaftLog.firstIndex()-1)
+		return
+	}
+
+	r.Term = max(r.Term, snapmeta.Term)
+	r.StateChanged = true
+
+	bfind := false
+	inx := -1
+	for _inx, ent := range r.RaftLog.entries {
+		if ent.Index == snapmeta.Index && ent.Term == snapmeta.Term {
+			bfind = true
+			inx = _inx
+			break
+		}
+	}
+
+	oldentries := r.RaftLog.entries
+	r.RaftLog.entries = []pb.Entry{
+		{
+			Term:  snapmeta.Term,
+			Index: snapmeta.Index,
+		},
+	}
+
+	r.RaftLog.applied = snapmeta.Index
+	if bfind == false {
+		r.RaftLog.committed = snapmeta.Index
+		//r.RaftLog.applied = m.Snapshot.Metadata.Index
+		r.RaftLog.stabled = snapmeta.Index
+	} else {
+		r.RaftLog.entries = append(r.RaftLog.entries, oldentries[inx+1:]...)
+		r.RaftLog.stabled = max(r.RaftLog.stabled, snapmeta.Index)
+		r.RaftLog.committed = max(r.RaftLog.committed, snapmeta.Index)
+		//r.RaftLog.applied = max(r.RaftLog.applied, m.Snapshot.Metadata.Index)
+	}
 }
 
 // addNode add a new node to raft group
@@ -736,18 +937,32 @@ func (r *Raft) Ready() Ready {
 		hard.Commit = r.RaftLog.committed
 		hard.Term = r.Term
 	}
-	return Ready{
-		HardState:        hard,
-		Entries:          r.RaftLog.unstableEntries(),
-		Messages:         r.msgs[:],
-		CommittedEntries: r.RaftLog.nextEnts(),
+	rd := Ready{
+		//Entries:          r.RaftLog.unstableEntries(),
+		Messages: r.msgs[:],
+		//CommittedEntries: r.RaftLog.nextEnts(),
 	}
+	if r.Snapshot != nil {
+		rd.Snapshot = *r.Snapshot
+		stabledterm, err := r.RaftLog.Term(r.RaftLog.stabled)
+		if err != nil {
+			panic(fmt.Sprintf(" stabled index %d can not get term ", r.RaftLog.stabled))
+		}
+		rd.SnapshoRaftStateIndex = r.RaftLog.stabled
+		rd.SnapshoRaftStateTerm = stabledterm
+	} else {
+		rd.Entries = r.RaftLog.unstableEntries()
+		rd.CommittedEntries = r.RaftLog.nextEnts()
+		rd.HardState = hard //已经更新了的 hardstate，如果没有给ready，下次会继续ready; 查看advanced
+		// commited 这个值 和 raftlog 有些关联，已经commited的log 一定要在raftlog中存在,否则会抛异常
+	}
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (r *Raft) HasReady() bool {
 	// Your Code Here (2A).
-	return len(r.msgs) > 0 || len(r.RaftLog.nextEnts()) > 0 || len(r.RaftLog.unstableEntries()) > 0 || r.StateChanged
+	return len(r.msgs) > 0 || len(r.RaftLog.nextEnts()) > 0 || len(r.RaftLog.unstableEntries()) > 0 || r.StateChanged || r.Snapshot != nil
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -770,4 +985,5 @@ func (r *Raft) Advance(rd Ready) {
 		rd.HardState.Commit == r.RaftLog.committed {
 		r.StateChanged = false
 	}
+	r.Snapshot = nil
 }

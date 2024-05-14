@@ -84,13 +84,16 @@ func newLog(storage Storage) *RaftLog {
 	}
 	ents = append(ents, logs...)
 	mylog.Printf(mylog.LevelBaisc, " entries fromstorage : ents: first %d-%d logs len : %d", ents[0].Index, ents[0].Term, len(logs))
-
+	if hard.Commit > ents[len(ents)-1].Index {
+		panic(fmt.Sprintf(" hard.Commit %d is bigger than storage's lastlog index %d ", hard.Commit, ents[len(ents)-1].Index))
+	}
 	raftlog := &RaftLog{
 		entries:   ents,
 		storage:   storage,
 		stabled:   last,
 		committed: hard.Commit,
-		applied:   0,
+		//applied:   0,
+		applied: oldinx,
 		//peerid:    peerid,
 	}
 	return raftlog
@@ -176,8 +179,38 @@ func (l *RaftLog) append(entries []pb.Entry) error {
 // We need to compact the log entries in some point of time like
 // storage compact stabled log entries prevent the log entries
 // grow unlimitedly in memory
-func (l *RaftLog) maybeCompact() {
+func (l *RaftLog) MaybeCompact(compactinx uint64, compactterm uint64) (error, uint64, uint64) {
 	// Your Code Here (2C).
+
+	if l.applied < compactinx {
+		compactinx = l.applied - 1
+		var err error = nil
+		compactterm, err = l.Term(compactinx)
+		if err != nil {
+			return err, 0, 0
+		}
+	}
+
+	if compactinx <= l.entries[0].Index || compactinx > l.applied {
+		return errors.New(fmt.Sprintf("peer %d bad compact index", l.peerid)), 0, 0
+	}
+	mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  maybecompact index: %d  term : %d  applyied is %d ", l.peerid, compactinx, compactterm, l.applied)
+
+	bfind := false
+	inx := 0
+	for _inx, item := range l.entries {
+		if compactinx == item.Index && compactterm == item.Term {
+			bfind = true
+			inx = _inx
+		}
+	}
+	if bfind == false {
+		panic(" this can not happen, when compact")
+	}
+	ents := []pb.Entry{{Index: compactinx, Term: compactterm}}
+	ents = append(ents, l.entries[inx+1:]...)
+	l.entries = ents
+	return nil, compactinx, compactterm
 }
 
 // allEntries return all the entries not compacted.
@@ -287,4 +320,8 @@ func (l *RaftLog) getOlderNextIndexfromTerm(term uint64) (uint64, uint64) {
 		return l.entries[1].Index, l.entries[1].Term
 	}
 	return previnx, prevterm
+}
+func (l *RaftLog) Info() string {
+	return fmt.Sprintf(" raftlog: len %d stabled %d commited %d apply %d  first: inx %d term %d -- last: inx %d term %d ",
+		len(l.entries), l.stabled, l.committed, l.applied, l.entries[0].Index, l.entries[0].Term, l.entries[len(l.entries)-1].Index, l.entries[len(l.entries)-1].Term)
 }
