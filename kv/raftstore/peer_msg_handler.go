@@ -65,22 +65,28 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			KvBatch := engine_util.WriteBatch{}
 
 			if ready.Snapshot.Metadata != nil {
-				applystatewrite = true
-				if _, err := d.peerStorage.ApplySnapshot(&ready.Snapshot); err == nil {
-					d.peerStorage.applyState.TruncatedState.Index = ready.Snapshot.Metadata.Index
-					d.peerStorage.applyState.TruncatedState.Term = ready.Snapshot.Metadata.Term
-					// snapshot kv 全部更新了，所以必须重新apply
-					d.peerStorage.applyState.AppliedIndex = ready.Snapshot.Metadata.Index
+				if d.peerStorage.IsSnapShotApplying() && d.peerStorage.SnapShotApplyCheckOver() {
+					ready.Snapshot.Metadata = nil
+					//mylog.Printf(mylog.LevelCompactSnapshot, "peer %s Applysnapshot over ", d.Tag)
+				} else {
+					applystatewrite = true
+					// 这段代码 是不是应该放在 if 内， snapshot成功之后，再进行状态的更新? 这里相当于先更新了
+					if _, err := d.peerStorage.ApplySnapshot(&ready.Snapshot); err == nil {
+						d.peerStorage.applyState.TruncatedState.Index = ready.Snapshot.Metadata.Index
+						d.peerStorage.applyState.TruncatedState.Term = ready.Snapshot.Metadata.Term
+						// snapshot kv 全部更新了，所以必须重新apply
+						d.peerStorage.applyState.AppliedIndex = ready.Snapshot.Metadata.Index
 
-					//if len(ready.Entries) == 0 {
+						//if len(ready.Entries) == 0 {
 
-					d.peerStorage.raftState.LastIndex = ready.SnapshoRaftStateIndex
-					d.peerStorage.raftState.LastTerm = ready.SnapshoRaftStateTerm
-					raftbatch := engine_util.WriteBatch{}
-					raftbatch.SetMeta(meta.RaftStateKey(d.regionId), d.peerStorage.raftState)
-					raftbatch.MustWriteToDB(d.peerStorage.Engines.Raft)
+						d.peerStorage.raftState.LastIndex = ready.SnapshoRaftStateIndex
+						d.peerStorage.raftState.LastTerm = ready.SnapshoRaftStateTerm
+						raftbatch := engine_util.WriteBatch{}
+						raftbatch.SetMeta(meta.RaftStateKey(d.regionId), d.peerStorage.raftState)
+						raftbatch.MustWriteToDB(d.peerStorage.Engines.Raft)
 
-					d.RaftGroup.Raft.HandleSnapshotAgain(*ready.Snapshot.Metadata)
+						//d.RaftGroup.Raft.HandleSnapshotAgain(*ready.Snapshot.Metadata)
+					}
 				}
 			} else {
 				_, err := d.peerStorage.SaveReadyState(&ready)

@@ -806,7 +806,10 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
 	//  restore the raft internal state like the term, commit index and membership information, etc, from the eraftpb.SnapshotMetadata in the message,
-
+	if r.Snapshot != nil {
+		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  handleSnapshot discard because last snapshot is not empty ", r.id)
+		return
+	}
 	if m.Snapshot.Metadata.Index <= r.RaftLog.firstIndex()-1 {
 		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  handleSnapshot discard because snapshotindex %d <= firstindex-1 %d",
 			r.id, m.Snapshot.Metadata.Index, r.RaftLog.firstIndex()-1)
@@ -876,7 +879,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.initPrs()
 }
 
-func (r *Raft) HandleSnapshotAgain(snapmeta pb.SnapshotMetadata) {
+/*func (r *Raft) HandleSnapshotAgain(snapmeta pb.SnapshotMetadata) {
 	// Your Code Here (2C).
 	//  restore the raft internal state like the term, commit index and membership information, etc, from the eraftpb.SnapshotMetadata in the message,
 	if snapmeta.Index < r.RaftLog.firstIndex()-1 {
@@ -917,7 +920,7 @@ func (r *Raft) HandleSnapshotAgain(snapmeta pb.SnapshotMetadata) {
 		r.RaftLog.committed = max(r.RaftLog.committed, snapmeta.Index)
 		//r.RaftLog.applied = max(r.RaftLog.applied, m.Snapshot.Metadata.Index)
 	}
-}
+}*/
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
@@ -985,5 +988,8 @@ func (r *Raft) Advance(rd Ready) {
 		rd.HardState.Commit == r.RaftLog.committed {
 		r.StateChanged = false
 	}
-	r.Snapshot = nil
+	if r.Snapshot != nil && rd.Snapshot.Metadata == nil {
+		r.Snapshot = nil
+		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  Advance clear snapshot ", r.id)
+	}
 }

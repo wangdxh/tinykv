@@ -343,6 +343,24 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	return nil
 }
 
+func (ps *PeerStorage) IsSnapShotApplying() bool {
+	return ps.snapState.StateType == snap.SnapState_Applying
+}
+func (ps *PeerStorage) SnapShotApplyCheckOver() bool {
+	applying := ps.snapState.StateType == snap.SnapState_Applying
+	if applying {
+		select {
+		case over, ok := <-ps.snapState.ApplyReceiver:
+			{
+				ps.snapState.StateType = snap.SnapState_Relax
+				mylog.Printf(mylog.LevelCompactSnapshot, "peer %s end applysnapshot return %v channel %v ", ps.Tag, over, ok)
+			}
+		}
+		return ps.snapState.StateType == snap.SnapState_Relax
+	}
+	return false
+}
+
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
@@ -369,7 +387,8 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResu
 	}
 
 	mylog.Printf(mylog.LevelCompactSnapshot, "peer %s start applysnapshot: index %d term %d", ps.Tag, snapshot.Metadata.Index, snapshot.Metadata.Term)
-	result := <-ch
+	return nil, nil
+	/*result := <-ch
 	ps.snapState = snap.SnapState{
 		StateType:     snap.SnapState_Relax,
 		ApplyReceiver: nil,
@@ -378,7 +397,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResu
 	if result {
 		return nil, nil
 	}
-	return nil, errors.New(" applysnapshot error ")
+	return nil, errors.New(" applysnapshot error ")*/
 }
 
 // Save memory states to disk.
