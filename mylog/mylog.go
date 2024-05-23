@@ -5,14 +5,16 @@ import (
 	"time"
 )
 
-var Level int = LevelBaisc | LevelCompactSnapshot //| LevelAppendEntry
+var Level int = LevelBaisc | LevelCompactSnapshot | LevelTransferLeader | LevelAppendEntry //| LevelProposal //| LevelHeartbeat
 
 const (
-	LevelBaisc               = 0x1 << 0
-	LevelAppendEntry     int = 0x1 << 1
+	LevelBaisc           int = 0x1 << 0
+	LevelAppendEntry         = 0x1 << 1
 	LevelVote                = 0x1 << 2
 	LevelCompactSnapshot     = 0x1 << 3
 	LevelHeartbeat           = 0x1 << 4
+	LevelTransferLeader      = 0x1 << 5
+	LevelProposal            = 0x1 << 6 // 非常多的打印
 )
 
 func Printf(level int, format string, a ...interface{}) {

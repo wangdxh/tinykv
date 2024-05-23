@@ -310,6 +310,7 @@ func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put {
+		fmt.Printf("request  %v ", req)
 		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put")
 	}
 }
@@ -335,6 +336,7 @@ func (c *Cluster) GetCF(cf string, key []byte) []byte {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Get {
+		fmt.Printf("request  %v ", req)
 		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Get")
 	}
 	return resp.Responses[0].Get.Value
@@ -354,6 +356,7 @@ func (c *Cluster) MustDeleteCF(cf string, key []byte) {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Delete {
+		fmt.Printf("request  %v ", req)
 		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Delete")
 	}
 }

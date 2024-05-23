@@ -387,7 +387,12 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResu
 	}
 
 	mylog.Printf(mylog.LevelCompactSnapshot, "peer %s start applysnapshot: index %d term %d", ps.Tag, snapshot.Metadata.Index, snapshot.Metadata.Term)
-	return nil, nil
+	old := ps.region
+	ps.region = snapData.Region
+	return &ApplySnapResult{
+		PrevRegion: old,
+		Region:     ps.Region(),
+	}, nil
 	/*result := <-ch
 	ps.snapState = snap.SnapState{
 		StateType:     snap.SnapState_Relax,

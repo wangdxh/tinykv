@@ -38,6 +38,9 @@ const (
 	MsgTypeStoreTick MsgType = 106
 	// message to start the ticker of store
 	MsgTypeStoreStart MsgType = 107
+
+	// kill myself
+	MsgTypePeerKillMyself MsgType = 108
 )
 
 type Msg struct {

@@ -104,6 +104,7 @@ func (rn *RawNode) Propose(data []byte) error {
 }
 
 // ProposeConfChange proposes a config change.
+// 这个Propose 不会就只是用来 测试用的吧，新的changepeer 全部用admin request了，垃圾
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
 	data, err := cc.Marshal()
 	if err != nil {

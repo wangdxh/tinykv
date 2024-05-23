@@ -1,7 +1,6 @@
 package raftstore
 
 import (
-	"bytes"
 	"fmt"
 	"github.com/golang/protobuf/proto"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
@@ -52,6 +51,25 @@ func (d *peerMsgHandler) getraftinfo(snap bool) string {
 		d.RaftGroup.Raft.RaftLog.Info())
 }
 
+func (d *peerMsgHandler) findpeerinraftpeers(raftpeerid uint64) (bool, int) {
+	for inx, item := range d.RaftGroup.Raft.Peers {
+		if item == raftpeerid {
+			return true, inx
+		}
+	}
+	return false, -1
+}
+
+func (d *peerMsgHandler) findpeerinregionpeers(raftpeerid uint64) (bool, int) {
+	for inx, item := range d.Region().Peers {
+		//mylog.Printf(mylog.LevelBaisc, " test %v %v  %v ", inx, item, d.Region().Peers)
+		if item.Id == raftpeerid {
+			return true, inx
+		}
+	}
+	return false, -1
+}
+
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
@@ -76,7 +94,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						d.peerStorage.applyState.TruncatedState.Term = ready.Snapshot.Metadata.Term
 						// snapshot kv 全部更新了，所以必须重新apply
 						d.peerStorage.applyState.AppliedIndex = ready.Snapshot.Metadata.Index
-
 						//if len(ready.Entries) == 0 {
 
 						d.peerStorage.raftState.LastIndex = ready.SnapshoRaftStateIndex
@@ -85,6 +102,11 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						raftbatch.SetMeta(meta.RaftStateKey(d.regionId), d.peerStorage.raftState)
 						raftbatch.MustWriteToDB(d.peerStorage.Engines.Raft)
 
+						//
+						d.ctx.storeMeta.Lock()
+						d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+						d.ctx.storeMeta.regions[d.regionId] = d.Region()
+						d.ctx.storeMeta.Unlock()
 						//d.RaftGroup.Raft.HandleSnapshotAgain(*ready.Snapshot.Metadata)
 					}
 				}
@@ -104,6 +126,13 @@ func (d *peerMsgHandler) HandleRaftReady() {
 								panic(" unmarshl error")
 							}
 							d.commitRaftCmdRequest(item.Index, item.Term, &cmdreq)
+						} else if item.EntryType == eraftpb.EntryType_EntryConfChange {
+							confchag := eraftpb.ConfChange{}
+							err := proto.Unmarshal(item.Data, &confchag)
+							if err != nil {
+								panic(" unmarshl confchange error")
+							}
+							d.processConfChange(item.Index, confchag, 0)
 						}
 					}
 				}
@@ -111,8 +140,35 @@ func (d *peerMsgHandler) HandleRaftReady() {
 					d.peerStorage.applyState.AppliedIndex = ready.CommittedEntries[len(ready.CommittedEntries)-1].Index
 				}
 			}
+
 			// write applystate, region state
-			meta.WriteRegionState(&KvBatch, d.Region(), rspb.PeerState_Normal)
+			regionpeerstate := rspb.PeerState_Normal
+			{
+				//mylog.Printf(mylog.LevelBaisc, " peer %s after confchange peers %v", d.Tag, d.RaftGroup.Raft.Peers)
+				for _, raftpeer := range d.RaftGroup.Raft.Peers {
+					if find, _ := d.findpeerinregionpeers(raftpeer); !find {
+						var peernew *metapb.Peer
+						if peerinfo := d.getPeerFromCache(raftpeer); peerinfo != nil {
+							peernew = &metapb.Peer{
+								Id:      peerinfo.Id,
+								StoreId: peerinfo.StoreId,
+							}
+						} else if raftpeer == d.peer.PeerId() {
+							peernew = d.Meta
+						}
+						if peernew != nil {
+							d.Region().Peers = append(d.Region().Peers, peernew)
+						}
+					}
+				}
+				applystatewrite = true
+				/// 刚刚重新创建，peers 为空，同时truncated index 和 term 都是0， 而不是5，这个时候如果写下去，然后重启了 这个peer无法重启 region 中没有 storeid 对应的peer
+				if len(d.Region().Peers) > 0 || d.peerStorage.applyState.TruncatedState.Index > 0 {
+					meta.WriteRegionState(&KvBatch, d.Region(), regionpeerstate)
+				}
+				//meta.WriteRegionState(&KvBatch, d.Region(), regionpeerstate)
+			}
+
 			if applystatewrite == true {
 				KvBatch.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 			}
@@ -145,9 +201,52 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	//d.proposals
 }
+
+func (d *peerMsgHandler) processConfChange(index uint64, confchag eraftpb.ConfChange, storeid uint64) {
+	bfind, _ := d.findpeerinraftpeers(confchag.NodeId)
+	reginfind, regioninx := d.findpeerinregionpeers(confchag.NodeId)
+
+	mylog.Printf(mylog.LevelBaisc, "peer %s apply index %d start confchange regionpeers %v raftpeers %v confchange %v store %d",
+		d.Tag, index, d.Region().Peers, d.RaftGroup.Raft.Peers, confchag, storeid)
+	if confchag.ChangeType == eraftpb.ConfChangeType_AddNode && bfind == false {
+		addpeer := &metapb.Peer{
+			Id:      confchag.NodeId,
+			StoreId: storeid,
+		}
+		if reginfind == false {
+			d.Region().Peers = append(d.Region().Peers, addpeer)
+		}
+		d.Region().RegionEpoch.ConfVer += 1
+		d.insertPeerCache(addpeer)
+	} else if confchag.ChangeType == eraftpb.ConfChangeType_RemoveNode && bfind == true {
+		if reginfind {
+			d.Region().Peers = append(d.Region().Peers[:regioninx], d.Region().Peers[regioninx+1:]...)
+		}
+		d.Region().RegionEpoch.ConfVer += 1
+		d.removePeerCache(confchag.NodeId)
+		if d.PeerId() == confchag.NodeId {
+			mylog.Printf(mylog.LevelBaisc, "peer %s will destroyPeer killmyself ", d.Tag)
+			d.ctx.router.send(d.regionId, message.Msg{
+				RegionID: d.regionId,
+				Type:     message.MsgTypePeerKillMyself,
+			})
+		}
+	} else {
+		mylog.Printf(mylog.LevelBaisc, "peer %s confchange discard", d.Tag)
+		return
+	}
+	d.RaftGroup.ApplyConfChange(confchag)
+	mylog.Printf(mylog.LevelBaisc, "peer %s after confchange region ppers %v raftpeers %v ", d.Tag, d.Region().Peers, d.RaftGroup.Raft.Peers)
+}
+
+func (d *peerMsgHandler) processSplit(splitreq *raft_cmdpb.SplitRequest) error {
+
+	return nil
+}
+
 func (d *peerMsgHandler) commitRaftCmdRequest(index uint64, term uint64, req *raft_cmdpb.RaftCmdRequest) {
 	cmdresp := raft_cmdpb.RaftCmdResponse{}
-	startkey, _ := d.Region().StartKey, d.Region().EndKey
+	//startkey, _ := d.Region().StartKey, d.Region().EndKey
 
 	var errret error
 	for _, item := range req.Requests {
@@ -168,11 +267,11 @@ func (d *peerMsgHandler) commitRaftCmdRequest(index uint64, term uint64, req *ra
 			}
 		case raft_cmdpb.CmdType_Put:
 			{
-				if startkey == nil || bytes.Compare(item.Put.Key, startkey) <= 0 {
+				/*if startkey == nil || bytes.Compare(item.Put.Key, startkey) <= 0 {
 					startkey = item.Put.Key[:]
 				}
-				d.Region().StartKey = startkey
-				d.Region().EndKey = nil
+				d.Region().StartKey = nil //startkey
+				d.Region().EndKey = nil*/
 
 				err := engine_util.PutCF(d.peerStorage.Engines.Kv, item.Put.Cf, item.Put.Key, item.Put.Value)
 				mylog.Printf(mylog.LevelAppendEntry, "peer %s apply put index %d cf%s key %v   val %v err %v ",
@@ -233,8 +332,19 @@ func (d *peerMsgHandler) commitRaftCmdRequest(index uint64, term uint64, req *ra
 					mylog.Printf(mylog.LevelCompactSnapshot, "peer %s apply compact to index %d term %d sourceinx term %d %d", d.Tag, compactinx, compactterm,
 						req.AdminRequest.CompactLog.CompactIndex, req.AdminRequest.CompactLog.CompactTerm)
 				}
-
 				break
+			}
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			{
+				confchange := eraftpb.ConfChange{
+					NodeId:     req.AdminRequest.ChangePeer.Peer.Id,
+					ChangeType: req.AdminRequest.ChangePeer.ChangeType,
+				}
+				d.processConfChange(index, confchange, req.AdminRequest.ChangePeer.Peer.StoreId)
+			}
+		case raft_cmdpb.AdminCmdType_Split:
+			{
+				errret = d.processSplit(req.AdminRequest.Split)
 			}
 		default:
 			{
@@ -283,13 +393,18 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
 		if err := d.onRaftMsg(raftMsg); err != nil {
-			log.Errorf("%s handle raft message error %v", d.Tag, err)
+			log.Errorf("%s handle raft message error %v from %v type %v ", d.Tag, err, raftMsg.FromPeer.Id, raftMsg.Message.MsgType)
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
 		d.onTick()
+
+	case message.MsgTypePeerKillMyself:
+		if bfind, _ := d.findpeerinraftpeers(d.PeerId()); bfind == false && d.MaybeDestroy() {
+			d.destroyPeer()
+		}
 	case message.MsgTypeSplitRegion:
 		split := msg.Data.(*message.MsgSplitRegion)
 		log.Infof("%s on split with %v", d.Tag, split.SplitKey)
@@ -353,13 +468,34 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 
-	err = d.RaftGroup.Propose(raftcmdrequest)
-	inx, term := d.RaftGroup.LastIndexAndTerm()
-	d.proposals = append(d.proposals, &proposal{
-		index: inx,
-		term:  term,
-		cb:    cb,
-	})
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_TransferLeader {
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		resp := newCmdResp()
+		resp.AdminResponse = &raft_cmdpb.AdminResponse{
+			CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+			TransferLeader: &raft_cmdpb.TransferLeaderResponse{},
+		}
+		cb.Done(resp)
+	} else {
+		inx1, _ := d.RaftGroup.LastIndexAndTerm()
+		err = d.RaftGroup.Propose(raftcmdrequest)
+		if err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+		inx, term := d.RaftGroup.LastIndexAndTerm()
+
+		d.RaftGroup.Raft.Printraftcmdrequest(inx, msg, false)
+		if err == nil && inx != inx1+1 {
+			panic(fmt.Sprintf(" error happend %d %d  msg %v ", inx1, inx, msg))
+		}
+
+		d.proposals = append(d.proposals, &proposal{
+			index: inx,
+			term:  term,
+			cb:    cb,
+		})
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -418,6 +554,8 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	}
 	if msg.GetIsTombstone() {
 		// we receive a message tells us to remove self.
+		mylog.Printf(mylog.LevelBaisc, "peer %s get tombstone maybe destory myepoch %v  from epoch %v, mypeer %v  frompeer %v",
+			d.Tag, d.Region().RegionEpoch, msg.RegionEpoch, d.Meta, msg.FromPeer)
 		d.handleGCPeerMsg(msg)
 		return nil
 	}
@@ -613,6 +751,7 @@ func (d *peerMsgHandler) checkSnapshot(msg *rspb.RaftMessage) (*snap.SnapKey, er
 
 func (d *peerMsgHandler) destroyPeer() {
 	log.Infof("%s starts destroy", d.Tag)
+	mylog.Printf(mylog.LevelBaisc, "%s starts destroy", d.Tag)
 	regionID := d.regionId
 	// We can't destroy a peer which is applying snapshot.
 	meta := d.ctx.storeMeta

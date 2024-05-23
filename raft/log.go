@@ -83,7 +83,6 @@ func newLog(storage Storage) *RaftLog {
 		panic(fmt.Sprintf(" get storage entries from %d to %d  error %v", first, last+1, err))
 	}
 	ents = append(ents, logs...)
-	mylog.Printf(mylog.LevelBaisc, " entries fromstorage : ents: first %d-%d logs len : %d", ents[0].Index, ents[0].Term, len(logs))
 	if hard.Commit > ents[len(ents)-1].Index {
 		panic(fmt.Sprintf(" hard.Commit %d is bigger than storage's lastlog index %d ", hard.Commit, ents[len(ents)-1].Index))
 	}
@@ -281,6 +280,15 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 		return dst
 	}
 	return nil
+}
+
+func (l *RaftLog) getPendiingConfIndex() uint64 {
+	for _, item := range l.entries {
+		if item.Index > l.applied && item.EntryType == pb.EntryType_EntryConfChange {
+			return item.Index
+		}
+	}
+	return 0
 }
 
 // LastIndex return the last index of the log entries

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/mylog"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	"math/rand"
 	"sort"
 )
@@ -117,6 +118,7 @@ type Progress struct {
 	Commited    uint64
 	Sending     bool
 	SendTick    uint64
+	//SingleSendround uint64
 }
 
 type Raft struct {
@@ -198,16 +200,17 @@ func newRaft(c *Config) *Raft {
 	r.heartbeatTimeout = c.HeartbeatTick
 
 	for _, item := range c.peers {
-		if item != r.id {
+		{
 			r.Peers = append(r.Peers, item)
 		}
 	}
-	r.Peers = append(r.Peers, r.id)
 
 	r.RaftLog = newLog(c.Storage)
 	r.RaftLog.applied = max(c.Applied, r.RaftLog.applied)
 	r.RaftLog.peerid = r.id
 	r.initPrs()
+	mylog.Printf(mylog.LevelBaisc, "peer %d newraft peers %v entries first %d-%d logs len : %d",
+		r.id, r.Peers, r.RaftLog.entries[0].Index, r.RaftLog.entries[0].Term, len(r.RaftLog.entries))
 
 	r.becomeFollower(r.Term, None)
 	return r
@@ -273,6 +276,8 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	//r.Term = term
 	//r.State = StateFollower
 	r.electionElapsed = 0
+	r.leadTransferee = 0
+	r.PendingConfIndex = 0
 	r.Lead = lead
 	mylog.Printf(mylog.LevelBaisc, "peer %d term %d becomefollow  l %d ", r.id, r.Term, r.Lead)
 }
@@ -287,6 +292,8 @@ func (r *Raft) becomeCandidate() {
 	r.electionElapsed = 0
 	r.electionTimeout = r.EleTimeout + rand.Intn(r.EleTimeout)
 	r.StateChanged = true
+	r.leadTransferee = 0
+	r.PendingConfIndex = 0
 
 	r.Term += 1
 	r.Lead = None
@@ -308,16 +315,65 @@ func (r *Raft) becomeLeader() {
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.StateChanged = true
+	r.leadTransferee = 0
 
 	r.Lead = r.id
 	r.initPrs()
 
 	mylog.Printf(mylog.LevelBaisc, "peer %d term %d becomeleader", r.id, r.Term)
+	r.PendingConfIndex = r.RaftLog.getPendiingConfIndex()
 
 	_ = r.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		Entries: []*pb.Entry{{Data: nil}},
 	})
+}
+
+func (r *Raft) IsInGroup(id uint64) bool {
+	_, has := r.Prs[id]
+	return has
+}
+
+func (r *Raft) IsConfChangeEntry(entry *pb.Entry) bool {
+	if entry.EntryType == pb.EntryType_EntryConfChange {
+		return true
+	} else if entry.EntryType == pb.EntryType_EntryNormal {
+		msg := new(raft_cmdpb.RaftCmdRequest)
+		err := msg.Unmarshal(entry.Data)
+		if err != nil {
+			panic("bad raftcmdrequest")
+		}
+		return msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer
+	}
+	return false
+}
+
+func (r *Raft) IsDeleteMe(entry *pb.Entry) bool {
+	if entry.EntryType == pb.EntryType_EntryConfChange {
+		confchange := new(pb.ConfChange)
+		err := confchange.Unmarshal(entry.Data)
+		if err != nil {
+			panic(" bad conf change")
+		}
+		if confchange.ChangeType == pb.ConfChangeType_RemoveNode && confchange.NodeId == r.id && r.IsInGroup(r.id) {
+			return true
+		}
+	} else if entry.EntryType == pb.EntryType_EntryNormal {
+		msg := new(raft_cmdpb.RaftCmdRequest)
+		err := msg.Unmarshal(entry.Data)
+		if err != nil {
+			panic("bad raftcmdrequest")
+		}
+
+		if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer &&
+			msg.AdminRequest.ChangePeer.ChangeType == pb.ConfChangeType_RemoveNode &&
+			msg.AdminRequest.ChangePeer.Peer.Id == r.id && r.IsInGroup(r.id) {
+			return true
+		}
+	} else {
+		panic(" sb")
+	}
+	return false
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -326,12 +382,17 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	if m.MsgType == pb.MessageType_MsgHup {
 		if r.State != StateLeader {
+			if r.IsInGroup(r.id) == false {
+				return nil
+			}
+
 			r.becomeCandidate()
 			if false == r.onlyme() {
-				// 避免重复发送
-				for inx := len(r.msgs) - 1; inx >= 0; inx-- {
+				for inx := 0; inx < len(r.msgs); {
 					if r.msgs[inx].MsgType == pb.MessageType_MsgRequestVote {
 						r.msgs = append(r.msgs[:inx], r.msgs[inx+1:]...)
+					} else {
+						inx++
 					}
 				}
 				for _, val := range r.Peers {
@@ -353,7 +414,12 @@ func (r *Raft) Step(m pb.Message) error {
 		return nil
 	} else if m.MsgType == pb.MessageType_MsgPropose {
 		if r.State == StateLeader {
+			if r.leadTransferee != 0 {
+				return errors.New("i am transfering leader")
+			}
+
 			var ents []pb.Entry
+			isdeleteme := false
 			startinx := r.RaftLog.LastIndex()
 			for i, item := range m.Entries {
 				ents = append(ents, pb.Entry{
@@ -362,7 +428,50 @@ func (r *Raft) Step(m pb.Message) error {
 					Index:     startinx + uint64(1+i),
 					Data:      item.Data,
 				})
+
+				if r.IsConfChangeEntry(&ents[len(ents)-1]) {
+					if r.RaftLog.applied < r.PendingConfIndex {
+						// not applied retur false
+						mylog.Printf(mylog.LevelBaisc, "peer %d term %d configchagne error apply %d < pendingconf %d ",
+							r.id, r.Term, r.RaftLog.applied, r.PendingConfIndex)
+						return errors.New("has Pendingconfindex ")
+					} else {
+						r.PendingConfIndex = ents[len(ents)-1].Index
+					}
+					if r.IsDeleteMe(&ents[len(ents)-1]) {
+						isdeleteme = true
+					}
+				}
 			}
+
+			if isdeleteme && len(r.Prs) >= 2 {
+				var transferee uint64 = 0
+				match := uint64(0)
+				for k, v := range r.Prs {
+					if k != r.id && v.Match > match {
+						transferee = k
+						match = v.Match
+					}
+				}
+				_ = r.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee, To: r.id})
+				mylog.Printf(mylog.LevelTransferLeader, "peer %d term %d admin want remove me, start TransferLeader, from %d to %d  peers : %v ",
+					r.id, r.Term, r.id, transferee, r.Peers)
+				return errors.New(fmt.Sprintf(" admin want remove me, start TransferLeader "))
+			}
+
+			for _, item := range ents {
+				if item.Data == nil {
+					mylog.Printf(mylog.LevelProposal, "peer %d term %d leader propose index %d  data is nil ", r.id, r.Term, item.Index)
+				} else if item.Data != nil && item.EntryType == pb.EntryType_EntryNormal {
+					msg := new(raft_cmdpb.RaftCmdRequest)
+					err := msg.Unmarshal(item.Data)
+					if err != nil {
+						panic("bad raftcmdrequest")
+					}
+					r.Printraftcmdrequest(item.Index, msg, true)
+				}
+			}
+
 			_ = r.RaftLog.append(ents)
 			val := r.Prs[r.id]
 			val.Match = r.RaftLog.LastIndex()
@@ -372,9 +481,11 @@ func (r *Raft) Step(m pb.Message) error {
 			if r.onlyme() {
 				r.RaftLog.committed = r.RaftLog.lastIndex()
 			} else {
-				for _, peer := range r.Peers {
-					if peer != r.id {
-						r.sendAppend(peer)
+				{
+					for _, peer := range r.Peers {
+						if peer != r.id {
+							r.sendAppend(peer)
+						}
 					}
 				}
 			}
@@ -418,6 +529,11 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleSnapshot(m)
 				return nil
 			}
+		case pb.MessageType_MsgTimeoutNow, pb.MessageType_MsgTransferLeader:
+			{
+				mylog.Printf(mylog.LevelTransferLeader, "peer %d term %d get MessageType_MsgTimeoutNow start election", r.id, r.Term)
+				return r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
+			}
 		}
 	} else if r.State == StateLeader {
 		switch m.MsgType {
@@ -433,6 +549,17 @@ func (r *Raft) Step(m pb.Message) error {
 			{
 				r.msgs = append(r.msgs, r.getResponse(m, pb.MessageType_MsgRequestVoteResponse))
 				return nil
+			}
+		case pb.MessageType_MsgTransferLeader: //MsgTransferLeader message is local message that not come from network
+			{
+				if _, has := r.Prs[m.From]; has {
+					if m.From == r.id {
+						r.leadTransferee = 0 // 转移到自己，终止操作
+					} else {
+						r.leadTransferee = m.From // 触发转移
+						r.CheckleaderTransfer(m.From, true)
+					}
+				}
 			}
 		}
 	} else if r.State == StateCandidate {
@@ -468,6 +595,25 @@ func (r *Raft) getAppendRequest(to uint64, preinx uint64, preterm uint64) pb.Mes
 	}
 }
 
+func (r *Raft) CheckleaderTransfer(from uint64, bsendappend bool) bool {
+	if r.leadTransferee > 0 && r.leadTransferee == from {
+		if r.Prs[r.leadTransferee].Match == r.RaftLog.LastIndex() {
+			response := pb.Message{
+				To:      r.leadTransferee,
+				From:    r.id,
+				Term:    r.Term,
+				MsgType: pb.MessageType_MsgTimeoutNow,
+			}
+			r.msgs = append(r.msgs, response)
+			// 这里不能将leadTransferee 清0， 否则leadTransferee不一定能当选
+		} else if bsendappend {
+			r.sendAppend(r.leadTransferee)
+		}
+		return true
+	}
+	return false
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
@@ -480,19 +626,19 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 
 	progress := r.Prs[to]
-	if progress.Sending == true && r.monoticks > 0 {
-		bsend := false
+	if progress.Sending == true && r.monoticks > 0 { // monoticks == 0 sending 失效，为了通过测试用例TestLeaderCommitEntry2AB
+		berase := false
 		for _inx, msg := range r.msgs {
 			if msg.To == to &&
 				(msg.MsgType == pb.MessageType_MsgAppend || msg.MsgType == pb.MessageType_MsgSnapshot) {
 				mylog.Printf(mylog.LevelAppendEntry, "peer %d send append to %d erase msg preindex %d preterm %d ents: %d ",
 					r.id, to, msg.Index, msg.LogTerm, len(msg.Entries))
 				r.msgs = append(r.msgs[0:_inx], r.msgs[_inx:]...)
-				bsend = true
+				berase = true
 				break
 			}
 		}
-		if bsend == false {
+		if berase == false {
 			mylog.Printf(mylog.LevelAppendEntry, " peer %d donotsendappend to %d because sending is false", r.id, to)
 			return false
 		}
@@ -533,9 +679,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 			for inx := 0; inx <= len(ents)-1; inx++ {
 				req.Entries = append(req.Entries, &ents[inx])
 			}
-			val := r.Prs[to]
-			val.Commited = r.RaftLog.committed
-			r.Prs[to] = val
+			/*val := r.Prs[to]
+			val.SingleSendround = r.RaftLog.committed
+			r.Prs[to] = val*/
 
 			if len(req.Entries) > 0 && req.Entries[0].Index != preinx+1 {
 				panic(" this can not happend")
@@ -550,9 +696,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 	} else if progress.Match == r.RaftLog.LastIndex() {
 		preinx, preterm := r.RaftLog.LastIndexTerm()
 		req := r.getAppendRequest(to, preinx, preterm)
-		val := r.Prs[to]
-		val.Commited = r.RaftLog.committed
-		r.Prs[to] = val
+		/*val := r.Prs[to]
+		val.SingleSendround = r.RaftLog.committed
+		r.Prs[to] = val*/
 
 		mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
 			r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
@@ -616,6 +762,9 @@ OUT:
 	if resp.Reject == true {
 		// resp Commit 保存的是，本地的最后一个Index，先直接定位
 		resp.Commit, _ = r.RaftLog.LastIndexTerm()
+	} else {
+		// 成功之后，返回commited
+		resp.Commit = r.RaftLog.committed
 	}
 	r.msgs = append(r.msgs, resp)
 	return nil
@@ -644,6 +793,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 	} else {
 		val.Match = m.Index
 		val.Next = val.Match + 1
+		val.Commited = m.Commit
 		r.Prs[m.From] = val
 	}
 
@@ -667,14 +817,16 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 		term, _ := r.RaftLog.Term(newcommit)
 		if term == r.Term {
 			r.RaftLog.committed = newcommit
-			/*r.Printf(0, "leader update commited to %d ", newcommit)*/
 		}
 	}
 
 	// broadcast commtied， 在commited 更改和之前之后，response的peer 可能不会收到commited更新的消息，所以要遍历
 	for key, val := range r.Prs {
 		if key != r.id {
-			if val.Match == r.RaftLog.lastIndex() && val.Commited < r.RaftLog.committed {
+			if ((val.Match == r.RaftLog.lastIndex() && val.Commited < r.RaftLog.committed) ||
+				val.Next <= r.RaftLog.LastIndex()) &&
+				val.Sending == false {
+				//if val.Next <= r.RaftLog.lastIndex() || val.Commited < r.RaftLog.committed {
 				/*r.Printf(0, " test  peer %d  valmatch %d r.lastindex %d valcommited %d  r.commited %d",
 				key, val.Match, r.RaftLog.lastIndex(), val.Commited, r.RaftLog.committed)*/
 				r.sendAppend(key)
@@ -682,6 +834,9 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 		}
 	}
 
+	if r.leadTransferee > 0 && r.leadTransferee == m.From {
+		r.CheckleaderTransfer(m.From, true)
+	}
 	return nil
 }
 
@@ -718,11 +873,18 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 		return nil
 	}
 
-	mylog.Printf(mylog.LevelHeartbeat, " peer %d handleHeartbeatResponse from %d  m.index %d  myraftlog lastindex %d m.commit %d  r.raftlog.commited %d ",
-		r.id, m.From, m.Index, r.RaftLog.LastIndex(), m.Commit, r.RaftLog.committed)
+	mylog.Printf(mylog.LevelHeartbeat, " peer %d handleHeartbeatResponse reject %v from %d  m.index %d  myraftlog lastindex %d m.commit %d  r.raftlog.commited %d ",
+		r.id, m.Reject, m.From, m.Index, r.RaftLog.LastIndex(), m.Commit, r.RaftLog.committed)
 
 	if m.Reject == false {
 		//if  {
+		{
+			if val, has := r.Prs[m.From]; has {
+				val.Commited = m.Commit
+				r.Prs[m.From] = val
+			}
+		}
+
 		if m.Commit < r.RaftLog.committed || m.Index < r.RaftLog.LastIndex() {
 			/*r.Printf(0, " get heartbeat resp from %d reject %v  r.lastindex %d m.index %d",
 			m.From, m.Reject, r.RaftLog.lastIndex(), m.Index)*/
@@ -733,11 +895,13 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 			var appenddelayticks uint64 = 3 // 50ms   1s
 			if r.monoticks == 0 || val.SendTick+appenddelayticks < r.monoticks {
 				val.Sending = false
-				val.Commited = m.Commit
 				r.Prs[m.From] = val
 				r.sendAppend(m.From)
 			}
 		}
+		r.CheckleaderTransfer(m.From, false)
+	} else {
+		panic(" this can not happen 888 heartbeatresp")
 	}
 	return nil
 }
@@ -879,57 +1043,41 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.initPrs()
 }
 
-/*func (r *Raft) HandleSnapshotAgain(snapmeta pb.SnapshotMetadata) {
-	// Your Code Here (2C).
-	//  restore the raft internal state like the term, commit index and membership information, etc, from the eraftpb.SnapshotMetadata in the message,
-	if snapmeta.Index < r.RaftLog.firstIndex()-1 {
-		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  handleSnapshotAgain discard because snapshotindex %d <= firstindex-1 %d",
-			r.id, snapmeta.Index, r.RaftLog.firstIndex()-1)
-		return
-	}
-
-	r.Term = max(r.Term, snapmeta.Term)
-	r.StateChanged = true
-
-	bfind := false
-	inx := -1
-	for _inx, ent := range r.RaftLog.entries {
-		if ent.Index == snapmeta.Index && ent.Term == snapmeta.Term {
-			bfind = true
-			inx = _inx
-			break
-		}
-	}
-
-	oldentries := r.RaftLog.entries
-	r.RaftLog.entries = []pb.Entry{
-		{
-			Term:  snapmeta.Term,
-			Index: snapmeta.Index,
-		},
-	}
-
-	r.RaftLog.applied = snapmeta.Index
-	if bfind == false {
-		r.RaftLog.committed = snapmeta.Index
-		//r.RaftLog.applied = m.Snapshot.Metadata.Index
-		r.RaftLog.stabled = snapmeta.Index
-	} else {
-		r.RaftLog.entries = append(r.RaftLog.entries, oldentries[inx+1:]...)
-		r.RaftLog.stabled = max(r.RaftLog.stabled, snapmeta.Index)
-		r.RaftLog.committed = max(r.RaftLog.committed, snapmeta.Index)
-		//r.RaftLog.applied = max(r.RaftLog.applied, m.Snapshot.Metadata.Index)
-	}
-}*/
-
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	for _, peer := range r.Peers {
+		if peer == id {
+			return
+		}
+	}
+	r.Peers = append(r.Peers, id)
+	if _, has := r.Prs[id]; has == true {
+		panic(fmt.Sprintf("peer %d Prs had has id %d", r.id, id))
+	}
+	r.Prs[id] = &Progress{
+		Match: 0,
+		Next:  r.RaftLog.LastIndex(), // 为什么不是 LastIndex+1?  如果+1， 没有新的proposal， 新node不会进行更新
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	for inx, peer := range r.Peers {
+		if peer == id {
+			r.Peers = append(r.Peers[:inx], r.Peers[inx+1:]...)
+			delete(r.Prs, id)
+			if id == r.id {
+				r.becomeFollower(r.Term, 0)
+			}
+			break
+		}
+	}
+	// 只有我一个，提交剩余的条目
+	if r.onlyme() && r.State == StateLeader {
+		r.RaftLog.committed = r.RaftLog.lastIndex()
+	}
 }
 
 func (r *Raft) Ready() Ready {
@@ -945,6 +1093,14 @@ func (r *Raft) Ready() Ready {
 		Messages: r.msgs[:],
 		//CommittedEntries: r.RaftLog.nextEnts(),
 	}
+	// 主要为了过测试用例
+	if r.Lead > 0 {
+		rd.SoftState = &SoftState{
+			Lead:      r.Lead,
+			RaftState: r.State,
+		}
+	}
+
 	if r.Snapshot != nil {
 		rd.Snapshot = *r.Snapshot
 		stabledterm, err := r.RaftLog.Term(r.RaftLog.stabled)
@@ -992,4 +1148,50 @@ func (r *Raft) Advance(rd Ready) {
 		r.Snapshot = nil
 		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d  Advance clear snapshot ", r.id)
 	}
+}
+
+func (r *Raft) Printraftcmdrequest(Index uint64, msg *raft_cmdpb.RaftCmdRequest, inraft bool) {
+	entrytype := ""
+	if len(msg.Requests) > 0 {
+		switch msg.Requests[0].CmdType {
+		case raft_cmdpb.CmdType_Put:
+			{
+				entrytype = fmt.Sprintf(" request put %s %s", string(msg.Requests[0].Put.Key), string(msg.Requests[0].Put.Value))
+			}
+		case raft_cmdpb.CmdType_Delete:
+			{
+				entrytype = fmt.Sprintf(" request delete %s", string(msg.Requests[0].Delete.Key))
+			}
+		case raft_cmdpb.CmdType_Snap:
+			{
+				entrytype = fmt.Sprintf(" request snap")
+			}
+		case raft_cmdpb.CmdType_Get:
+			{
+				entrytype = fmt.Sprintf(" request get %s", string(msg.Requests[0].Get.Key))
+			}
+		}
+	} else if msg.AdminRequest != nil {
+		entrytype = fmt.Sprintf("adminreqest type: %v", msg.AdminRequest.CmdType)
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+			{
+				entrytype = fmt.Sprintf("adminreqest transfer leader : %v ", msg.AdminRequest.TransferLeader)
+			}
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			{
+				entrytype = fmt.Sprintf("adminreqest change peer : %v ", msg.AdminRequest.ChangePeer)
+			}
+
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			{
+				entrytype = fmt.Sprintf("adminreqest compactlog : %v ", msg.AdminRequest.CompactLog)
+			}
+		case raft_cmdpb.AdminCmdType_Split:
+			{
+				entrytype = fmt.Sprintf("adminreqest split : %v ", msg.AdminRequest.Split)
+			}
+		}
+	}
+	mylog.Printf(mylog.LevelProposal, "peer %d term %d leader propose index %d in raft %v  %s ", r.id, r.Term, Index, inraft, entrytype)
 }

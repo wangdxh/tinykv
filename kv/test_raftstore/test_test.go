@@ -123,10 +123,13 @@ func confchanger(t *testing.T, cluster *Cluster, ch chan bool, done *int32) {
 		store := rand.Uint64()%count + 1
 		if p := FindPeer(region, store); p != nil {
 			if len(region.GetPeers()) > 1 {
+				fmt.Printf("-------------------------------------------------------------------- start removepeer %v \r\n", p)
 				cluster.MustRemovePeer(region.GetId(), p)
 			}
 		} else {
-			cluster.MustAddPeer(region.GetId(), cluster.AllocPeer(store))
+			p := cluster.AllocPeer(store)
+			fmt.Printf("------------------------------------------------------------------- start addepeer %v \r\n", p)
+			cluster.MustAddPeer(region.GetId(), p)
 		}
 		time.Sleep(time.Duration(rand.Int63()%200) * time.Millisecond)
 	}
@@ -193,8 +196,11 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int, 1)
 	}
+	format := "2006-01-02 15:04:05.000"
+
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
+		fmt.Printf("%s ----test start test iteration %d \n", time.Now().Format(format), i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
@@ -232,12 +238,16 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		if confchange {
 			// Allow the clients to perfrom some operations without interruption
 			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 			go confchanger(t, cluster, ch_confchange, &done_confchanger)
 		}
+
 		time.Sleep(5 * time.Second)
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
 		atomic.StoreInt32(&done_confchanger, 1) // tell confchanger to quit
+		fmt.Printf("%s ----test done clients, partitioner, confchagne  %d \n", time.Now().Format(format), i)
+
 		if unreliable || partitions {
 			// log.Printf("wait for partitioner\n")
 			<-ch_partitioner
@@ -252,6 +262,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 
 		// log.Printf("wait for clients\n")
 		<-ch_clients
+		fmt.Printf("%s ---test  <-ch_clients   %d \n", time.Now().Format(format), i)
 
 		if crash {
 			log.Warnf("shutdown servers\n")
@@ -267,6 +278,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				cluster.StartServer(uint64(i))
 			}
 		}
+		fmt.Printf("%s ---test  start scan    %d \n", time.Now().Format(format), i)
 
 		for cli := 0; cli < nclients; cli++ {
 			// log.Printf("read from clients %d\n", cli)
@@ -281,11 +293,15 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			v := string(bytes.Join(values, []byte("")))
 			checkClntAppends(t, cli, v, j)
 
+			fmt.Printf("%s ---test  start delete cli %d  j %d\n", time.Now().Format(format), i, j)
+
 			for k := 0; k < j; k++ {
 				key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", k)
 				cluster.MustDelete([]byte(key))
 			}
+			fmt.Printf("%s ---test  end delete cli %d  j %d\n", time.Now().Format(format), cli, j)
 		}
+		fmt.Printf("%s ---test process over begin maxraftlog \n", time.Now().Format(format))
 
 		if maxraftlog > 0 {
 			time.Sleep(1 * time.Second)
@@ -595,6 +611,26 @@ func TestBasicConfChange3B(t *testing.T) {
 	MustGetEqual(cluster.engines[2], []byte("k4"), []byte("v4"))
 	MustGetNone(cluster.engines[3], []byte("k1"))
 	MustGetNone(cluster.engines[3], []byte("k4"))
+
+	/*
+		1,2,3,4,5
+		remove 2,2
+		remove 3,3
+		remove 4,4
+		remove 5,5
+
+		add 2,2
+		k2 v2
+		add 3,3
+		remove 2,2
+		k3 v3
+		add 2,2
+		remove 2,2
+		add 2,4
+		remove 3,3
+		k4 v4
+
+	*/
 }
 
 func TestConfChangeRemoveLeader3B(t *testing.T) {
