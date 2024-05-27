@@ -137,7 +137,7 @@ func (snapCtx *snapContext) cleanUpRange(regionId uint64, startKey, endKey []byt
 	} else {
 		log.Infof("succeed in deleting data in range. [regionId: %d, startKey: %s, endKey: %s]", regionId,
 			hex.EncodeToString(startKey), hex.EncodeToString(endKey))
-		mylog.Printf(mylog.LevelCompactSnapshot, "destroy region %d range %s - %s", regionId, mylog.GetString(startKey), mylog.GetString(endKey))
+		mylog.Printf(mylog.LevelBaisc, "destroy region %d range %s - %s", regionId, mylog.GetString(startKey), mylog.GetString(endKey))
 	}
 }
 

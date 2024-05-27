@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"sync"
 
 	"github.com/google/btree"
@@ -471,10 +472,6 @@ func (m *MockSchedulerClient) findRegion(key []byte) *regionItem {
 	})
 
 	m.regionsRange.Len()
-	if result != nil {
-		//fmt.Printf(" findregion ok regionslen: %d key %s result %d [%s - %s)\n", m.regionsRange.Len(), string(key),
-		//	result.region.Id, string(result.region.StartKey), string(result.region.EndKey))
-	}
 
 	if result == nil || !result.Contains(key) {
 		strprint := fmt.Sprintf("findregion err key %s :\n", string(key))
@@ -483,7 +480,7 @@ func (m *MockSchedulerClient) findRegion(key []byte) *regionItem {
 			strprint += fmt.Sprintf("\t regionid %d   [%s - %s) \n", r.region.Id, string(r.region.StartKey), string(r.region.EndKey))
 			return true
 		})
-		fmt.Printf(strprint)
+		mylog.Printf(mylog.LevelTest, "%s", strprint)
 
 		return nil
 	}

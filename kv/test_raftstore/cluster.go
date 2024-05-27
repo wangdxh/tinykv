@@ -187,11 +187,8 @@ func (c *Cluster) AllocPeer(storeID uint64) *metapb.Peer {
 func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
 	startTime := time.Now()
 	for i := 0; i < 10 || time.Since(startTime) < timeout; i++ {
-
-		//fmt.Printf(" %s start getregion \n", mylog.GetTimeStr())
 		region := c.GetRegion(key)
 		regionID := region.GetId()
-		//fmt.Printf(" %s end getregion id %d \n", mylog.GetTimeStr(), regionID)
 
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
@@ -276,7 +273,7 @@ func (c *Cluster) GetRegion(key []byte) *metapb.Region {
 	for i := 0; i < 100; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
-			fmt.Sprintf("schedulerClient.GetRegion key %s  regionid %d [%s - %s] \n", string(key), region.Id, string(region.StartKey), string(region.EndKey))
+			mylog.Printf(mylog.LevelTest, "schedulerClient.GetRegion key %s  regionid %d [%s - %s] \n", string(key), region.Id, string(region.StartKey), string(region.EndKey))
 			return region
 		}
 		// We may meet range gap after split, so here we will
