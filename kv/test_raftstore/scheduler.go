@@ -3,6 +3,7 @@ package test_raftstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/google/btree"
@@ -469,7 +470,21 @@ func (m *MockSchedulerClient) findRegion(key []byte) *regionItem {
 		return false
 	})
 
+	m.regionsRange.Len()
+	if result != nil {
+		//fmt.Printf(" findregion ok regionslen: %d key %s result %d [%s - %s)\n", m.regionsRange.Len(), string(key),
+		//	result.region.Id, string(result.region.StartKey), string(result.region.EndKey))
+	}
+
 	if result == nil || !result.Contains(key) {
+		strprint := fmt.Sprintf("findregion err key %s :\n", string(key))
+		m.regionsRange.Descend(func(i btree.Item) bool {
+			r := i.(*regionItem)
+			strprint += fmt.Sprintf("\t regionid %d   [%s - %s) \n", r.region.Id, string(r.region.StartKey), string(r.region.EndKey))
+			return true
+		})
+		fmt.Printf(strprint)
+
 		return nil
 	}
 

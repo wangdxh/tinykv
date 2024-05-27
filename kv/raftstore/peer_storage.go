@@ -369,6 +369,11 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResu
 		return nil, err
 	}
 
+	old := ps.region
+	ps.region = snapData.Region
+	// 提前更新 ps.region 否则 RegionTaskApply 中的start end 是老的snapshot，当进行apply的时候，
+	// 会删除错误的区间
+
 	// Hint: things need to do here including: update peer storage state like raftState and applyState, etc,
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
@@ -387,22 +392,11 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot) (*ApplySnapResu
 	}
 
 	mylog.Printf(mylog.LevelCompactSnapshot, "peer %s start applysnapshot: index %d term %d", ps.Tag, snapshot.Metadata.Index, snapshot.Metadata.Term)
-	old := ps.region
-	ps.region = snapData.Region
+
 	return &ApplySnapResult{
 		PrevRegion: old,
 		Region:     ps.Region(),
 	}, nil
-	/*result := <-ch
-	ps.snapState = snap.SnapState{
-		StateType:     snap.SnapState_Relax,
-		ApplyReceiver: nil,
-	}
-	mylog.Printf(mylog.LevelCompactSnapshot, "peer %s end applysnapshot: index %d term %d return %v ", ps.Tag, snapshot.Metadata.Index, snapshot.Metadata.Term, result)
-	if result {
-		return nil, nil
-	}
-	return nil, errors.New(" applysnapshot error ")*/
 }
 
 // Save memory states to disk.

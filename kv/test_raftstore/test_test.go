@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Connor1996/badger"
+	"github.com/google/btree"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
@@ -220,7 +221,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				} else {
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
-					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
+					//fmt.Printf("%d: client new scan %v-%v\n", cli, start, end)
 					values := cluster.Scan([]byte(start), []byte(end))
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
@@ -756,6 +757,11 @@ func TestSplitRecoverManyClients3B(t *testing.T) {
 	GenericTest(t, "3B", 20, false, true, false, -1, false, true)
 }
 
+func TestSplitConfChangeSnapshotRecoverManyClientsbywxh3B(t *testing.T) {
+	// Test: restarts, snapshots, conf change, many clients (3B) ...
+	GenericTest(t, "3B", 20, false, true, false, 100, true, true)
+}
+
 func TestSplitUnreliable3B(t *testing.T) {
 	// Test: unreliable net, snapshots, conf change, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, false, false, -1, false, true)
@@ -774,4 +780,32 @@ func TestSplitConfChangeSnapshotUnreliableRecover3B(t *testing.T) {
 func TestSplitConfChangeSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, conf change, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 100, true, true)
+}
+
+type MyTree struct {
+	Age  int
+	Name string
+}
+
+func (m *MyTree) Less(item btree.Item) bool {
+	return m.Age < (item.(*MyTree)).Age
+}
+
+func TestBtree3B(t *testing.T) {
+	tree := btree.New(2) //创建一个2-3-4 树
+	for i := 0; i < 100; i += 2 {
+		//插入数据
+		tree.ReplaceOrInsert(&MyTree{Age: i, Name: "freedom" + strconv.Itoa(i)})
+	}
+	/*tree.DescendRange(&MyTree{Age: 55}, &MyTree{Age: 47}, func(a btree.Item) bool {
+		item := a.(*MyTree)
+		fmt.Println(item)
+		return true
+	})*/
+	fmt.Printf("treelen %d \n", tree.Len())
+	tree.Descend(func(item btree.Item) bool {
+		i := item.(*MyTree)
+		fmt.Println(i)
+		return true
+	})
 }

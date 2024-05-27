@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -186,8 +187,12 @@ func (c *Cluster) AllocPeer(storeID uint64) *metapb.Peer {
 func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
 	startTime := time.Now()
 	for i := 0; i < 10 || time.Since(startTime) < timeout; i++ {
+
+		//fmt.Printf(" %s start getregion \n", mylog.GetTimeStr())
 		region := c.GetRegion(key)
 		regionID := region.GetId()
+		//fmt.Printf(" %s end getregion id %d \n", mylog.GetTimeStr(), regionID)
+
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
 		if resp == nil {
@@ -199,9 +204,10 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 			SleepMS(100)
 			continue
 		}
+		//fmt.Printf(" %s return resp \n", mylog.GetTimeStr())
 		return resp, txn
 	}
-	panic("request timeout")
+	panic(fmt.Sprintf("request timeout key %s reqs %v ", string(key), reqs))
 }
 
 func (c *Cluster) CallCommand(request *raft_cmdpb.RaftCmdRequest, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
@@ -270,13 +276,14 @@ func (c *Cluster) GetRegion(key []byte) *metapb.Region {
 	for i := 0; i < 100; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
+			fmt.Sprintf("schedulerClient.GetRegion key %s  regionid %d [%s - %s] \n", string(key), region.Id, string(region.StartKey), string(region.EndKey))
 			return region
 		}
 		// We may meet range gap after split, so here we will
 		// retry to get the region again.
 		SleepMS(20)
 	}
-	panic(fmt.Sprintf("find no region for %s", hex.EncodeToString(key)))
+	panic(fmt.Sprintf("find no region for %s %s", hex.EncodeToString(key), string(key)))
 }
 
 func (c *Cluster) GetRandomRegion() *metapb.Region {
@@ -377,8 +384,12 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 			panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap")
 		}
 		region := resp.Responses[0].GetSnap().Region
+		mylog.Printf(mylog.LevelTest, "test snapscan start %s - end %s get region %d  [%s-%s) epoch %d-%d",
+			mylog.GetString(key), mylog.GetString(end), region.Id, region.StartKey, region.EndKey, region.RegionEpoch.Version, region.GetRegionEpoch().ConfVer)
+
 		iter := raft_storage.NewRegionReader(txn, *region).IterCF(engine_util.CfDefault)
 		for iter.Seek(key); iter.Valid(); iter.Next() {
+			mylog.Printf(mylog.LevelTest, "test snapscan item %s ", string(iter.Item().Key()))
 			if engine_util.ExceedEndKey(iter.Item().Key(), end) {
 				break
 			}

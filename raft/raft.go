@@ -172,13 +172,14 @@ type Raft struct {
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
 
-	Peers        []uint64
-	StateChanged bool
-	EleTimeout   int
-	DebugLevel   int
-	PrintfPrefix string
-	Snapshot     *pb.Snapshot
-	monoticks    uint64 // when in test cases ，monoticks maybe is 0
+	Peers            []uint64
+	StateChanged     bool
+	EleTimeout       int
+	DebugLevel       int
+	PrintfPrefix     string
+	Snapshot         *pb.Snapshot
+	monoticks        uint64 // when in test cases ，monoticks maybe is 0
+	candidateTimeout uint64
 }
 
 // newRaft return a raft peer with the given config
@@ -196,7 +197,8 @@ func newRaft(c *Config) *Raft {
 	r.Term = hard.GetTerm()
 	r.Vote = hard.GetVote()
 	r.EleTimeout = c.ElectionTick
-	r.electionTimeout = r.EleTimeout
+	//r.electionTimeout = r.EleTimeout
+	r.electionTimeout = r.EleTimeout + rand.Intn(r.EleTimeout)
 	r.heartbeatTimeout = c.HeartbeatTick
 
 	for _, item := range c.peers {
@@ -204,7 +206,9 @@ func newRaft(c *Config) *Raft {
 			r.Peers = append(r.Peers, item)
 		}
 	}
-
+	if len(r.Peers) == 0 {
+		mylog.Printf(mylog.LevelBaisc, "test")
+	}
 	r.RaftLog = newLog(c.Storage)
 	r.RaftLog.applied = max(c.Applied, r.RaftLog.applied)
 	r.RaftLog.peerid = r.id
@@ -337,11 +341,11 @@ func (r *Raft) IsInGroup(id uint64) bool {
 func (r *Raft) IsConfChangeEntry(entry *pb.Entry) bool {
 	if entry.EntryType == pb.EntryType_EntryConfChange {
 		return true
-	} else if entry.EntryType == pb.EntryType_EntryNormal {
+	} else if entry.EntryType == pb.EntryType_EntryNormal && entry.Data != nil {
 		msg := new(raft_cmdpb.RaftCmdRequest)
 		err := msg.Unmarshal(entry.Data)
 		if err != nil {
-			panic("bad raftcmdrequest")
+			return false
 		}
 		return msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer
 	}
@@ -358,7 +362,7 @@ func (r *Raft) IsDeleteMe(entry *pb.Entry) bool {
 		if confchange.ChangeType == pb.ConfChangeType_RemoveNode && confchange.NodeId == r.id && r.IsInGroup(r.id) {
 			return true
 		}
-	} else if entry.EntryType == pb.EntryType_EntryNormal {
+	} else if entry.EntryType == pb.EntryType_EntryNormal && entry.Data != nil {
 		msg := new(raft_cmdpb.RaftCmdRequest)
 		err := msg.Unmarshal(entry.Data)
 		if err != nil {
@@ -387,20 +391,7 @@ func (r *Raft) Step(m pb.Message) error {
 			}
 
 			r.becomeCandidate()
-			if false == r.onlyme() {
-				for inx := 0; inx < len(r.msgs); {
-					if r.msgs[inx].MsgType == pb.MessageType_MsgRequestVote {
-						r.msgs = append(r.msgs[:inx], r.msgs[inx+1:]...)
-					} else {
-						inx++
-					}
-				}
-				for _, val := range r.Peers {
-					if val != r.id {
-						r.sendRequestVote(val)
-					}
-				}
-			}
+			r.candidateSendRequestVote()
 		}
 		return nil
 	} else if m.MsgType == pb.MessageType_MsgBeat {
@@ -466,7 +457,7 @@ func (r *Raft) Step(m pb.Message) error {
 					msg := new(raft_cmdpb.RaftCmdRequest)
 					err := msg.Unmarshal(item.Data)
 					if err != nil {
-						panic("bad raftcmdrequest")
+						continue
 					}
 					r.Printraftcmdrequest(item.Index, msg, true)
 				}
@@ -478,6 +469,8 @@ func (r *Raft) Step(m pb.Message) error {
 			val.Next = val.Match + 1
 			r.Prs[r.id] = val
 
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d propose index %d ",
+				r.id, r.Term, r.RaftLog.lastIndex())
 			if r.onlyme() {
 				r.RaftLog.committed = r.RaftLog.lastIndex()
 			} else {
@@ -643,8 +636,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 			return false
 		}
 	}
-
+	// 12   --  12
 	if r.RaftLog.LastIndex() >= progress.Next {
+		mylog.Printf(mylog.LevelAppendEntryDetail, "peer %d term %d sending %v", r.id, r.Term, progress.Sending)
 		if progress.Next < 1 {
 			progress.Next = 1
 		}
@@ -700,7 +694,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		val.SingleSendround = r.RaftLog.committed
 		r.Prs[to] = val*/
 
-		mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents : %d ",
+		mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d : preIndex: %d , preLogTerm: %d commit %d ents2 : %d ",
 			r.id, r.Term, to, req.Index, req.LogTerm, req.Commit, len(req.Entries))
 		r.msgs = append(r.msgs, req)
 	} else {
@@ -735,7 +729,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) error {
 			for _, item := range m.Entries {
 				ents = append(ents, *item)
 			}
-			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d follower  raftlog len %d  append ents len %d ,first: inx %d term %d end: inx %d term %d from peer %d leaderis %d",
+			mylog.Printf(mylog.LevelAppendEntryDetail, "peer %d term %d follower  raftlog len %d  append ents len %d ,first: inx %d term %d end: inx %d term %d from peer %d leaderis %d",
 				r.id, r.Term, len(r.RaftLog.entries), len(ents), ents[0].Index, ents[0].Term, ents[len(ents)-1].Index, ents[len(ents)-1].Term, m.From, r.Lead)
 
 			err = r.RaftLog.append(ents)
@@ -773,6 +767,7 @@ OUT:
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 	// Your Code Here (2A).
 	//r.Printf(0, " get append response from %d  reject %v m.index %d  ", m.From, m.Reject, m.Index)
+	peermatchchange := false
 	val := r.Prs[m.From]
 	val.Sending = false
 	if m.Reject == true {
@@ -786,16 +781,21 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 		val.Next = inx
 		val.Commited = 0
 		r.Prs[m.From] = val
-		mylog.Printf(mylog.LevelCompactSnapshot, "peer %d sendappend to %d reject m.Index %d m.logterm %d , Next will be %d ",
-			r.id, m.From, m.Index, m.LogTerm, inx)
+		mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d send append to %d Append reject m.Index %d m.logterm %d , Next will be %d ",
+			r.id, r.Term, m.From, m.Index, m.LogTerm, inx)
 		r.sendAppend(m.From)
 		return nil
 	} else {
+		if val.Match != m.Index || m.Commit != val.Commited {
+			peermatchchange = true
+		}
 		val.Match = m.Index
 		val.Next = val.Match + 1
 		val.Commited = m.Commit
 		r.Prs[m.From] = val
 	}
+	mylog.Printf(mylog.LevelAppendEntryDetail, "peer %d term %d send append to %d Append Ok  match %d next %d  lastlogindex %d -- commited %d raftlogcommited %d ",
+		r.id, r.Term, m.From, val.Match, val.Next, r.RaftLog.LastIndex(), m.Commit, r.RaftLog.committed)
 
 	var newcommit uint64 = 0
 	//if true
@@ -813,6 +813,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 		/*r.Printf(0, "new commit %d in  %v", newcommit, checkcommit)*/
 	}
 
+	//commitedchagne := false
 	if newcommit > r.RaftLog.committed {
 		term, _ := r.RaftLog.Term(newcommit)
 		if term == r.Term {
@@ -821,10 +822,12 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) error {
 	}
 
 	// broadcast commtied， 在commited 更改和之前之后，response的peer 可能不会收到commited更新的消息，所以要遍历
+
 	for key, val := range r.Prs {
 		if key != r.id {
-			if ((val.Match == r.RaftLog.lastIndex() && val.Commited < r.RaftLog.committed) ||
-				val.Next <= r.RaftLog.LastIndex()) &&
+			if ((key == m.From && peermatchchange) || key != m.From) &&
+				((val.Match == r.RaftLog.lastIndex() && val.Commited < r.RaftLog.committed) ||
+					val.Next <= r.RaftLog.LastIndex()) &&
 				val.Sending == false {
 				//if val.Next <= r.RaftLog.lastIndex() || val.Commited < r.RaftLog.committed {
 				/*r.Printf(0, " test  peer %d  valmatch %d r.lastindex %d valcommited %d  r.commited %d",
@@ -892,7 +895,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 			if has == false {
 				panic(" this can not happen123")
 			}
-			var appenddelayticks uint64 = 3 // 50ms   1s
+			var appenddelayticks uint64 = 1 // 50ms   1s
 			if r.monoticks == 0 || val.SendTick+appenddelayticks < r.monoticks {
 				val.Sending = false
 				r.Prs[m.From] = val
@@ -919,6 +922,26 @@ func (r *Raft) sendRequestVote(to uint64) {
 	}
 	//r.Printf(0, " send request vote to %d   index %d logterm %d ", to, inx, term)
 	r.msgs = append(r.msgs, req)
+}
+
+// request vote 多发送一次，是在实际测试中，发现网络unreliable,丢数据时leader选举太菜
+// 如果压根没有对方返回vote的回应，也不会再发
+func (r *Raft) candidateSendRequestVote() {
+	if false == r.onlyme() && r.State == StateCandidate {
+		for inx := 0; inx < len(r.msgs); {
+			if r.msgs[inx].MsgType == pb.MessageType_MsgRequestVote {
+				r.msgs = append(r.msgs[:inx], r.msgs[inx+1:]...)
+			} else {
+				inx++
+			}
+		}
+		for _, val := range r.Peers {
+			_, has := r.votes[val]
+			if val != r.id && has == false { // 本次term内，已经发送过的，就不发送了
+				r.sendRequestVote(val)
+			}
+		}
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
@@ -961,6 +984,10 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) error {
 		} else if len(r.votes) == len(r.Peers) {
 			// 没有达成，返回为follower,
 			r.becomeFollower(r.Term, None)
+		} else {
+			// 再重新发送一次candidate的请求，在网络丢包的时候，通过增加发送请求次数，从而保证质量
+			// 不然选举成功的会受到网络影响，时间大幅度延长
+			r.candidateSendRequestVote()
 		}
 	}
 	return nil
