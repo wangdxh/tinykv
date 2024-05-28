@@ -208,8 +208,8 @@ func (d *peerMsgHandler) processConfChange(index uint64, confchag eraftpb.ConfCh
 	bfind, _ := d.findpeerinraftpeers(confchag.NodeId)
 	reginfind, regioninx := d.findpeerinregionpeers(confchag.NodeId)
 
-	mylog.Printf(mylog.LevelBaisc, "peer %s apply index confchange %d start  regionpeers %v raftpeers %v confchange %v store %d",
-		d.Tag, index, d.Region().Peers, d.RaftGroup.Raft.Peers, confchag, storeid)
+	mylog.Printf(mylog.LevelBaisc, "peer %s apply index confchange %d start confchange %v store %d now: regionpeers %v raftpeers %v ",
+		d.Tag, index, confchag, storeid, d.Region().Peers, d.RaftGroup.Raft.Peers)
 	if confchag.ChangeType == eraftpb.ConfChangeType_AddNode && bfind == false {
 		addpeer := &metapb.Peer{
 			Id:      confchag.NodeId,
@@ -238,7 +238,7 @@ func (d *peerMsgHandler) processConfChange(index uint64, confchag eraftpb.ConfCh
 		return
 	}
 	d.RaftGroup.ApplyConfChange(confchag)
-	mylog.Printf(mylog.LevelBaisc, "peer %s after confchange region ppers %v raftpeers %v ", d.Tag, d.Region().Peers, d.RaftGroup.Raft.Peers)
+	mylog.Printf(mylog.LevelBaisc, "peer %s after confchange region raftpeers %v  ppers %v ", d.Tag, d.RaftGroup.Raft.Peers, d.Region().Peers)
 }
 
 func (d *peerMsgHandler) splitfindnewpeers(splitreq *raft_cmdpb.SplitRequest) []*metapb.Peer {

@@ -202,7 +202,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 		return true, nil
 	}
 	if !util.IsInitialMsg(msg.Message) {
-		log.Debugf("target peer %s doesn't exist", msg.ToPeer)
+		mylog.Basic("target peer %s doesn't exist", msg.ToPeer)
 		return false, nil
 	}
 

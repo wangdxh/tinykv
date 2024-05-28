@@ -235,6 +235,11 @@ func (r *Raft) initPrs() {
 		}
 	}
 }
+func (r *Raft) startHup() {
+	_ = r.Step(pb.Message{
+		MsgType: pb.MessageType_MsgHup,
+	})
+}
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
@@ -255,9 +260,7 @@ func (r *Raft) tick() {
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout {
 			/*r.electionElapsed = 0*/
-			_ = r.Step(pb.Message{
-				MsgType: pb.MessageType_MsgHup,
-			})
+			r.startHup()
 		}
 	}
 }
@@ -911,7 +914,8 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) error {
 				r.sendAppend(m.From)
 			}
 		}
-		r.CheckleaderTransfer(m.From, false)
+		//如果只在response中发送数据，当发送的回应消息丢失之后，会导致对方无法接收和触发后续的transfer
+		r.CheckleaderTransfer(m.From, true)
 	} else {
 		panic(" this can not happen 888 heartbeatresp")
 	}
@@ -1094,6 +1098,12 @@ func (r *Raft) addNode(id uint64) {
 	r.Prs[id] = &Progress{
 		Match: 0,
 		Next:  r.RaftLog.LastIndex(), // 为什么不是 LastIndex+1?  如果+1， 没有新的proposal， 新node不会进行更新
+	}
+	// 如果新增的peer 不在目的store上，原来heartbeat commit为0，可以重建
+	// 现在heartbeat的commit 使用了，导致目的store上不存在的peer，不能重建了
+	if r.State == StateLeader /*&& len(r.Peers) == 2*/ && r.IsInGroup(r.id) {
+		r.becomeFollower(r.Term, 0)
+		r.startHup()
 	}
 }
 
