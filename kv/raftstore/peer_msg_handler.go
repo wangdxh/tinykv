@@ -75,6 +75,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
+
 	// Your Code Here (2B).
 	if d.RaftGroup.HasReady() {
 		ready := d.RaftGroup.Ready()
@@ -498,7 +499,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
 		if err := d.onRaftMsg(raftMsg); err != nil {
-			log.Errorf("%s handle raft message error %v from %v type %v ", d.Tag, err, raftMsg.FromPeer.Id, raftMsg.Message.MsgType)
+			mylog.Basic("%s handle raft message error %v from %v type %v ", d.Tag, err, raftMsg.FromPeer.Id, raftMsg.Message.MsgType)
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
@@ -520,8 +521,32 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 		gcSnap := msg.Data.(*message.MsgGCSnap)
 		d.onGCSnap(gcSnap.Snaps)
 	case message.MsgTypeStart:
-		d.startTicker()
+		{
+			// 处理pending votes消息， peer创建完成之后，就开始处理pending的消息
+			d.startTicker()
+			d.ctx.storeMeta.Lock()
+			for inx := 0; inx < len(d.ctx.storeMeta.pendingVotes); {
+				if PeerEqual(d.ctx.storeMeta.pendingVotes[inx].ToPeer, d.Meta) {
+					raftMsg := d.ctx.storeMeta.pendingVotes[inx]
+					mylog.Basic("peer %s process pendingvotes from %s ", d.Tag, raftMsg.FromPeer)
+					if err := d.onRaftMsg(raftMsg); err != nil {
+						mylog.Basic("%s handle raft message error %v from %v type %v ", d.Tag, err, raftMsg.FromPeer.Id, raftMsg.Message.MsgType)
+					}
+					d.ctx.storeMeta.pendingVotes = append(d.ctx.storeMeta.pendingVotes[:inx], d.ctx.storeMeta.pendingVotes[inx+1:]...)
+				} else {
+					inx++
+				}
+			}
+			d.ctx.storeMeta.Unlock()
+		}
 	}
+}
+
+func PeerEqual(peer2 *metapb.Peer, peer3 *metapb.Peer) bool {
+	if peer2.Id == peer3.Id && peer2.StoreId == peer3.StoreId {
+		return true
+	}
+	return false
 }
 
 func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) error {
@@ -830,7 +855,7 @@ func (d *peerMsgHandler) checkSnapshot(msg *rspb.RaftMessage) (*snap.SnapKey, er
 	defer meta.Unlock()
 	if !util.RegionEqual(meta.regions[d.regionId], d.Region()) {
 		if !d.isInitialized() {
-			log.Infof("%s stale delegate detected, skip", d.Tag)
+			mylog.Basic("%s stale delegate detected, skip", d.Tag)
 			return &key, nil
 		} else {
 			panic(fmt.Sprintf("%s meta corrupted %s != %s", d.Tag, meta.regions[d.regionId], d.Region()))

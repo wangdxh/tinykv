@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"time"
 
 	"github.com/pingcap-incubator/tinykv/kv/config"
@@ -49,6 +50,7 @@ func replicatePeer(storeID uint64, cfg *config.Config, sched chan<- worker.Task,
 	engines *engine_util.Engines, regionID uint64, metaPeer *metapb.Peer) (*peer, error) {
 	// We will remove tombstone key when apply snapshot
 	log.Infof("[region %v] replicates peer with ID %d", regionID, metaPeer.GetId())
+	mylog.Basic("[store %d region %v] replicates peer newpeer with ID %d", storeID, regionID, metaPeer.GetId())
 	region := &metapb.Region{
 		Id:          regionID,
 		RegionEpoch: &metapb.RegionEpoch{},

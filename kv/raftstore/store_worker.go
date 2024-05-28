@@ -211,7 +211,9 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 		EndKey:   msg.EndKey,
 	}) {
 		log.Debugf("msg %s is overlapped with exist region %s", msg, region)
-		mylog.Printf(mylog.LevelBaisc, "storeid %d msg %s is overlapped with exist region %s", d.id, msg, region)
+		mylog.Basic("peer %d  to peer %d  msg %s is overlapped with exist storeid %d region %s",
+			msg.FromPeer.Id, msg.ToPeer.Id, msg, d.id, region)
+
 		if util.IsFirstVoteMessage(msg.Message) {
 			meta.pendingVotes = append(meta.pendingVotes, msg)
 		}

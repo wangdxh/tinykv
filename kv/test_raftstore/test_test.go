@@ -3,6 +3,7 @@ package test_raftstore
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"math/rand"
 	_ "net/http/pprof"
 	"strconv"
@@ -808,4 +809,17 @@ func TestBtree3B(t *testing.T) {
 		fmt.Println(i)
 		return true
 	})
+	metapeer1 := &metapb.Peer{
+		Id:      1,
+		StoreId: 2,
+	}
+	metapeer2 := &metapb.Peer{
+		Id:      1,
+		StoreId: 2,
+	}
+	if metapeer1 == metapeer2 {
+		fmt.Println("metapeer1 and metapeer2 are metapeer1")
+	} else {
+		fmt.Println("sble meta diff")
+	}
 }

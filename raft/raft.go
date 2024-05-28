@@ -851,6 +851,7 @@ func (r *Raft) sendHeartbeat(to uint64) error {
 		To:      to,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
+		Commit:  r.RaftLog.committed, // commit 利用heartbeat，进行传输，增加提交的速率
 	}
 	r.msgs = append(r.msgs, req)
 	return nil
@@ -861,6 +862,14 @@ func (r *Raft) handleHeartbeat(m pb.Message) error {
 	// Your Code Here (2A).
 	response := r.getResponse(m, pb.MessageType_MsgHeartbeatResponse)
 	if m.Term >= r.Term {
+		// 进行commit 更新，否则heartbeat的用处太小了
+		lastindex, lastterm := r.RaftLog.LastIndexTerm()
+		m.Commit = min(m.Commit, lastindex)
+		if lastterm == r.Term && m.Commit > r.RaftLog.committed {
+			mylog.Printf(mylog.LevelAppendEntry, "peer %d term %d follower update commited from %d to %d ", r.id, r.Term, r.RaftLog.committed, m.Commit)
+			r.RaftLog.committed = m.Commit
+		}
+
 		r.electionElapsed = 0
 		response.Index = r.RaftLog.LastIndex()
 		response.Commit = r.RaftLog.committed

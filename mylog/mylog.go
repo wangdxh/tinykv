@@ -26,6 +26,11 @@ func Printf(level int, format string, a ...interface{}) {
 		fmt.Printf("%s--%s\n", time.Now().Format(format), str)
 	}
 }
+
+func Basic(format string, a ...interface{}) {
+	Printf(LevelBaisc, format, a...)
+}
+
 func GetTimeStr() string {
 	format := "2006-01-02 15:04:05.000"
 	return fmt.Sprintf("%s", time.Now().Format(format))
