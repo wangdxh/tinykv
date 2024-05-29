@@ -14,9 +14,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"path"
 	"sync"
 	"time"
@@ -280,39 +282,61 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
-	localregion := c.GetRegion(region.GetID())
-	if localregion != nil && util.IsEpochStale(region.GetRegionEpoch(), localregion.GetRegionEpoch()) {
-		return nil
+	if region.GetRegionEpoch() == nil {
+		mylog.Printf(mylog.LevelTest, "region %d epole is nil  %v ", region.GetID(), region.GetRegionEpoch())
+		return &util.ErrEpochNotMatch{}
 	}
-
 	c.core.Lock()
 	defer c.core.Unlock()
-	overlaps := c.core.Regions.GetOverlaps(region)
-	for _, overlap := range overlaps {
-		if util.IsEpochStale(region.GetRegionEpoch(), overlap.GetRegionEpoch()) {
-			return nil
-		}
+	localregion := c.core.Regions.GetRegion(region.GetID())
+	if localregion != nil && util.IsEpochStale(region.GetRegionEpoch(), localregion.GetRegionEpoch()) {
+		mylog.Printf(mylog.LevelTest, "epole stale  %v  %v ", region.GetRegionEpoch(), localregion.GetRegionEpoch())
+		return &util.ErrEpochNotMatch{}
 	}
 
-	if localregion == nil {
-		c.core.Regions.AddRegion(region)
-	} else if util.IsEpochBigger(region.GetRegionEpoch(), localregion.GetRegionEpoch()) ||
+	overlaps := c.core.Regions.GetOverlaps(region)
+	for _, overlap := range overlaps {
+		//mylog.Printf(mylog.LevelTest, " overlaps : %v %v ", region.GetRegionEpoch(), overlap.GetRegionEpoch())
+		if util.IsEpochStale(region.GetRegionEpoch(), overlap.GetRegionEpoch()) {
+			return errors.New(" region has overlaped")
+		}
+	}
+	/*
+		meta            *metapb.Region
+			learners        []*metapb.Peer
+			voters          []*metapb.Peer
+			leader          *metapb.Peer
+			pendingPeers    []*metapb.Peer
+			approximateSize int64
+	*/
+
+	if localregion == nil ||
+		// region meta
+		util.IsEpochBigger(region.GetMeta().GetRegionEpoch(), localregion.GetMeta().GetRegionEpoch()) ||
+		!util.PeersEqual(region.GetMeta().GetPeers(), localregion.GetMeta().GetPeers()) ||
+		0 != bytes.Compare(region.GetMeta().StartKey, localregion.GetMeta().StartKey) ||
+		0 != bytes.Compare(region.GetMeta().EndKey, localregion.GetMeta().EndKey) ||
+		//region info
+		!util.PeersEqual(region.GetVoters(), localregion.GetVoters()) ||
 		!util.PeerEqual(region.GetLeader(), localregion.GetLeader()) ||
 		(len(region.GetPendingPeers()) > 0 || len(localregion.GetPendingPeers()) > 0) ||
 		region.GetApproximateSize() != localregion.GetApproximateSize() {
-
-		for _, peer := range region.GetPeers() {
-			storeinfo := c.core.Stores.GetStore(peer.StoreId)
-
-			if storeinfo == nil {
-
-			} else {
-
-			}
-			//c.core.Stores.UpdateStoreStatus(region, leaderCount, regionCount, pendingPeerCount, leaderSize, regionSize)
-		}
+		//mylog.Printf(mylog.LevelTest, "epoch new %v  now %v", region.GetRegionEpoch(), localregion.GetRegionEpoch())
 		c.core.Regions.SetRegion(region)
+
+		for _, peer := range append(region.GetVoters(), region.GetLearners()...) {
+			storeid := peer.StoreId
+			c.core.Stores.UpdateStoreStatus(storeid,
+				c.core.Regions.GetStoreLeaderCount(storeid),
+				c.core.Regions.GetStoreRegionCount(storeid),
+				c.core.Regions.GetStorePendingPeerCount(storeid),
+				c.core.Regions.GetStoreLeaderRegionSize(storeid),
+				c.core.Regions.GetStoreRegionSize(storeid))
+		}
+		return nil
 	}
+	mylog.Printf(mylog.LevelTest, " stale region info \n\t %s \n\t %s ", localregion.GetMeta(), region.GetMeta())
+	//return errors.New(" stale region ")
 	return nil
 }
 

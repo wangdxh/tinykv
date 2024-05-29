@@ -68,7 +68,7 @@ func IsEpochEquall(epoch *metapb.RegionEpoch, checkEpoch *metapb.RegionEpoch) bo
 }
 
 func IsEpochBigger(epoch *metapb.RegionEpoch, checkEpoch *metapb.RegionEpoch) bool {
-	return epoch.Version > checkEpoch.Version || epoch.ConfVer > checkEpoch.ConfVer
+	return (epoch.Version > checkEpoch.Version) || (epoch.Version == checkEpoch.Version && epoch.ConfVer > checkEpoch.ConfVer)
 }
 
 func IsVoteMessage(msg *eraftpb.Message) bool {
@@ -212,4 +212,22 @@ func RegionEqual(l, r *metapb.Region) bool {
 		return false
 	}
 	return l.Id == r.Id && l.RegionEpoch.Version == r.RegionEpoch.Version && l.RegionEpoch.ConfVer == r.RegionEpoch.ConfVer
+}
+
+func PeersEqual(l, r []*metapb.Peer) bool {
+	if len(l) != len(r) {
+		return false
+	}
+	bfind := false
+	for _, lpeer := range l {
+		for _, rpeer := range l {
+			if PeerEqual(lpeer, rpeer) {
+				bfind = true
+			}
+		}
+		if bfind == false {
+			return false
+		}
+	}
+	return true
 }

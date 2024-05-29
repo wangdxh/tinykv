@@ -809,6 +809,38 @@ func TestBtree3B(t *testing.T) {
 		fmt.Println(i)
 		return true
 	})
+
+	fmt.Printf("treelen %d -------------------------\n", tree.Len())
+
+	tree.AscendGreaterOrEqual(&MyTree{Age: 89}, func(item btree.Item) bool {
+		i := item.(*MyTree)
+		fmt.Println(i)
+		return true
+	})
+
+	fmt.Printf("treelen %d -------------------------\n", tree.Len())
+
+	tree.DescendGreaterThan(&MyTree{Age: 90}, func(item btree.Item) bool {
+		i := item.(*MyTree)
+		fmt.Println(i)
+		return true
+	})
+
+	fmt.Printf("treelen %d -------------------------\n", tree.Len())
+
+	tree.DescendLessOrEqual(&MyTree{Age: 90}, func(item btree.Item) bool {
+		i := item.(*MyTree)
+		fmt.Println(i)
+		return true
+	})
+	fmt.Printf("treelen %d -------------------------\n", tree.Len())
+
+	tree.AscendLessThan(&MyTree{Age: 90}, func(item btree.Item) bool {
+		i := item.(*MyTree)
+		fmt.Println(i)
+		return true
+	})
+
 	metapeer1 := &metapb.Peer{
 		Id:      1,
 		StoreId: 2,

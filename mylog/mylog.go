@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-var Level int = LevelBaisc | LevelCompactSnapshot | LevelTransferLeader //| LevelAppendEntry | LevelTest //LevelAppendEntryDetail //| LevelProposal //| LevelHeartbeat
+var Level int = LevelBaisc | LevelCompactSnapshot | LevelTransferLeader | LevelTest //| LevelAppendEntry | LevelTest //LevelAppendEntryDetail //| LevelProposal //| LevelHeartbeat
 
 const (
 	LevelBaisc             int = 0x1 << 0
