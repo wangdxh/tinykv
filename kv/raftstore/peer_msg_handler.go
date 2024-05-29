@@ -526,7 +526,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 			d.startTicker()
 			d.ctx.storeMeta.Lock()
 			for inx := 0; inx < len(d.ctx.storeMeta.pendingVotes); {
-				if PeerEqual(d.ctx.storeMeta.pendingVotes[inx].ToPeer, d.Meta) {
+				if util.PeerEqual(d.ctx.storeMeta.pendingVotes[inx].ToPeer, d.Meta) {
 					raftMsg := d.ctx.storeMeta.pendingVotes[inx]
 					mylog.Basic("peer %s process pendingvotes from %s ", d.Tag, raftMsg.FromPeer)
 					if err := d.onRaftMsg(raftMsg); err != nil {
@@ -540,13 +540,6 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 			d.ctx.storeMeta.Unlock()
 		}
 	}
-}
-
-func PeerEqual(peer2 *metapb.Peer, peer3 *metapb.Peer) bool {
-	if peer2.Id == peer3.Id && peer2.StoreId == peer3.StoreId {
-		return true
-	}
-	return false
 }
 
 func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) error {

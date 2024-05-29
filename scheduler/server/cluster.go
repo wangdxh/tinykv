@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"path"
 	"sync"
 	"time"
@@ -279,7 +280,39 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
+	localregion := c.GetRegion(region.GetID())
+	if localregion != nil && util.IsEpochStale(region.GetRegionEpoch(), localregion.GetRegionEpoch()) {
+		return nil
+	}
 
+	c.core.Lock()
+	defer c.core.Unlock()
+	overlaps := c.core.Regions.GetOverlaps(region)
+	for _, overlap := range overlaps {
+		if util.IsEpochStale(region.GetRegionEpoch(), overlap.GetRegionEpoch()) {
+			return nil
+		}
+	}
+
+	if localregion == nil {
+		c.core.Regions.AddRegion(region)
+	} else if util.IsEpochBigger(region.GetRegionEpoch(), localregion.GetRegionEpoch()) ||
+		!util.PeerEqual(region.GetLeader(), localregion.GetLeader()) ||
+		(len(region.GetPendingPeers()) > 0 || len(localregion.GetPendingPeers()) > 0) ||
+		region.GetApproximateSize() != localregion.GetApproximateSize() {
+
+		for _, peer := range region.GetPeers() {
+			storeinfo := c.core.Stores.GetStore(peer.StoreId)
+
+			if storeinfo == nil {
+
+			} else {
+
+			}
+			//c.core.Stores.UpdateStoreStatus(region, leaderCount, regionCount, pendingPeerCount, leaderSize, regionSize)
+		}
+		c.core.Regions.SetRegion(region)
+	}
 	return nil
 }
 

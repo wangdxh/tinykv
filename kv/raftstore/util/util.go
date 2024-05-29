@@ -63,6 +63,13 @@ func CheckKeyInRegionInclusive(key []byte, region *metapb.Region) error {
 func IsEpochStale(epoch *metapb.RegionEpoch, checkEpoch *metapb.RegionEpoch) bool {
 	return epoch.Version < checkEpoch.Version || epoch.ConfVer < checkEpoch.ConfVer
 }
+func IsEpochEquall(epoch *metapb.RegionEpoch, checkEpoch *metapb.RegionEpoch) bool {
+	return epoch.Version == checkEpoch.Version && epoch.ConfVer == checkEpoch.ConfVer
+}
+
+func IsEpochBigger(epoch *metapb.RegionEpoch, checkEpoch *metapb.RegionEpoch) bool {
+	return epoch.Version > checkEpoch.Version || epoch.ConfVer > checkEpoch.ConfVer
+}
 
 func IsVoteMessage(msg *eraftpb.Message) bool {
 	tp := msg.GetMsgType()

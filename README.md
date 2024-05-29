@@ -24,6 +24,11 @@ The whole project is a skeleton code for a key-value server and a scheduler serv
   * Implement handlers of `KvGet`, `KvPrewrite`, and `KvCommit` requests.
   * Implement handlers of `KvScan`, `KvCheckTxnStatus`, `KvBatchRollback`, and `KvResolveLock` requests.
 
+## tinykv architecture 
+![overview](./tinykv-regionepoch.drawio.png)
+
+
+
 ## Code Structure
 
 ![overview](doc/imgs/overview.png)
@@ -37,9 +42,6 @@ The whole project is organized into the following directories:
 * `scheduler` contains the implementation of the TinyScheduler, which is responsible for managing TinyKV nodes and generating timestamps.
 * `proto` contains the implementation of all communication between nodes and processes uses Protocol Buffers over gRPC. This package contains the protocol definitions used by TinyKV, and the generated Go code that you can use.
 * `log` contains utility to output log based on level.
-
-## tinykv architecture
-![overview](./tinykv.drawio.png)
 
 ## Reading List
 
