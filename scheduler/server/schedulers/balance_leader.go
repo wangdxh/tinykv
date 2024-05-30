@@ -85,9 +85,11 @@ func (l *balanceLeaderScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 	stores := cluster.GetStores()
 	sources := filter.SelectSourceStores(stores, l.filters, cluster)
 	targets := filter.SelectTargetStores(stores, l.filters, cluster)
+	// 降序排列
 	sort.Slice(sources, func(i, j int) bool {
 		return sources[i].GetLeaderCount() > sources[j].GetLeaderCount()
 	})
+	// 升序排列
 	sort.Slice(targets, func(i, j int) bool {
 		return targets[i].GetLeaderCount() < targets[j].GetLeaderCount()
 	})

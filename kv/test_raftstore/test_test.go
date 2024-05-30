@@ -6,6 +6,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"math/rand"
 	_ "net/http/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -854,4 +855,18 @@ func TestBtree3B(t *testing.T) {
 	} else {
 		fmt.Println("sble meta diff")
 	}
+
+	tt := []MyTree{
+		MyTree{Age: 89, Name: "freedom"},
+		MyTree{Age: 8, Name: "freedom"},
+		MyTree{Age: 90, Name: "freedom"},
+	}
+	sort.Slice(tt, func(i, j int) bool {
+		return tt[i].Age > tt[j].Age
+	})
+	fmt.Printf(" %v \n", tt)
+	sort.Slice(tt, func(i, j int) bool {
+		return tt[i].Age < tt[j].Age
+	})
+	fmt.Printf(" %v \n", tt)
 }

@@ -15,6 +15,7 @@ package server
 
 import (
 	"context"
+	"github.com/pingcap-incubator/tinykv/mylog"
 	"sync"
 	"time"
 
@@ -326,6 +327,7 @@ type scheduleController struct {
 // newScheduleController creates a new scheduleController.
 func newScheduleController(c *coordinator, s schedule.Scheduler) *scheduleController {
 	ctx, cancel := context.WithCancel(c.ctx)
+	mylog.Printf(mylog.LevelTest, " start from here ???")
 	return &scheduleController{
 		Scheduler:    s,
 		cluster:      c.cluster,
