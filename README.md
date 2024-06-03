@@ -24,8 +24,8 @@ The whole project is a skeleton code for a key-value server and a scheduler serv
   * Implement handlers of `KvGet`, `KvPrewrite`, and `KvCommit` requests.
   * Implement handlers of `KvScan`, `KvCheckTxnStatus`, `KvBatchRollback`, and `KvResolveLock` requests.
 
-## tinykv architecture 
-![overview](./tinykv-regionepoch.drawio.png)
+## tinykv architecture by kedacom wangxiaohui
+![overview](./tinykv-simple.drawio.png)
 
 
 
